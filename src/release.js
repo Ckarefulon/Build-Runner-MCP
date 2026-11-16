@@ -14,8 +14,8 @@ import { RUNNER_REPO_FALLBACK, normalizeShell, resolveTargets, verifyRef } from 
 
 export const RELEASE_WORKFLOW_FILE = 'release.yml'
 
-const POLL_MIN_MS = 1500
-const POLL_MAX_MS = 8000
+const POLL_MIN_MS = 1000
+const POLL_MAX_MS = 2500
 const RELEASE_JOB_NAME = 'build and publish'
 
 function sleep(ms) {
