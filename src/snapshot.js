@@ -22,7 +22,16 @@
  * never do that.
  */
 
-import { collectChanges, parseRemote, summarizeChanges, isGitRepo, repoInfo } from './workspace.js'
+import {
+  collectChanges,
+  collectChangesAgainst,
+  parseRemote,
+  summarizeChanges,
+  isGitRepo,
+  repoInfo,
+  hasCommit,
+  fetchCommit,
+} from './workspace.js'
 import { parseSlug } from './github.js'
 
 /** Deterministic branch name so repeated builds of one repo reuse it. */
@@ -78,7 +87,32 @@ export async function publishWorkspace(client, options) {
   // published commit sits on top of the branch the author actually worked from.
   const baseCommit = await client.resolveCommit(target.owner, target.repo, baseRef)
 
-  if (changes.length === 0) {
+  // The local HEAD may be AHEAD of the remote base — commits exist on disk but
+  // were never pushed. `git status` cannot see those, so a workspace snapshot
+  // built only from status silently omits them: the build then runs on the
+  // remote's older commit while reporting success. Diff against the actual
+  // remote commit instead, which captures both uncommitted edits AND unpushed
+  // commits in one comparison.
+  let effectiveChanges = changes
+  let aheadOfRemote = false
+  if (info.head !== baseCommit.sha) {
+    // The local clone may predate the remote base. Fetch it rather than failing
+    // with an instruction the caller may not be able to act on.
+    if (!hasCommit(dir, baseCommit.sha) && !fetchCommit(dir, baseCommit.sha)) {
+      throw new Error(
+        `本地仓库不包含远端基准提交 ${baseCommit.sha.slice(0, 7)}（${baseRef}），自动 fetch 也没拿到。\n` +
+          '可能原因：本地没有配置 origin、没有网络、或该提交不在默认抓取的分支上。\n' +
+          '处理方式：手动 `git fetch origin` 后重试，或把 ref 指向本地已有的分支。'
+      )
+    }
+    const against = collectChangesAgainst(dir, baseCommit.sha)
+    effectiveChanges = against.changes
+    aheadOfRemote = true
+  }
+
+  const effectiveSummary = summarizeChanges(effectiveChanges)
+
+  if (effectiveChanges.length === 0) {
     return {
       repo: `${target.owner}/${target.repo}`,
       branch,
@@ -87,9 +121,14 @@ export async function publishWorkspace(client, options) {
       sha: baseCommit.sha,
       ref: baseRef,
       changed: 0,
-      summary,
-      note: '工作区没有未提交的改动，直接使用 baseRef 构建。',
+      summary: effectiveSummary,
       published: false,
+      // Distinguish "nothing to do" from "silently fell back": the caller can
+      // now tell that the build will use the remote commit as-is.
+      note:
+        changes.length === 0
+          ? '工作区与本地 HEAD 一致，且本地 HEAD 与远端基准相同：直接使用 baseRef 构建。'
+          : '工作区无未提交改动，但本地 HEAD 与远端基准一致：直接使用 baseRef 构建。',
     }
   }
 
@@ -99,9 +138,14 @@ export async function publishWorkspace(client, options) {
       branch,
       baseRef,
       baseSha: baseCommit.sha,
-      changed: changes.length,
-      summary,
-      files: changes.map(change => ({ path: change.path, kind: change.kind, size: change.size ?? 0 })),
+      changed: effectiveChanges.length,
+      summary: effectiveSummary,
+      aheadOfRemote,
+      files: effectiveChanges.map(change => ({
+        path: change.path,
+        kind: change.kind,
+        size: change.size ?? 0,
+      })),
       published: false,
       dryRun: true,
     }
@@ -110,7 +154,7 @@ export async function publishWorkspace(client, options) {
   // Upload only the blobs that changed. Unchanged files never leave the machine.
   const tree = []
   let uploadedBytes = 0
-  for (const change of changes) {
+  for (const change of effectiveChanges) {
     if (change.kind === 'deleted') {
       // A null sha removes the path from the base tree.
       tree.push({ path: change.path, mode: '100644', type: 'blob', sha: null })
@@ -126,17 +170,18 @@ export async function publishWorkspace(client, options) {
     tree,
   })
 
-  const changedList = changes
+  const changedList = effectiveChanges
     .map(change => `${change.kind[0]}:${change.path}`)
     .slice(0, 20)
     .join(', ')
   const commit = await client.createCommit(target.owner, target.repo, {
     message:
       message ??
-      `build-runner: workspace snapshot (${summary.total} 处改动)\n\n` +
+      `build-runner: workspace snapshot (${effectiveSummary.total} 处改动)\n\n` +
         `base: ${baseRef} @ ${baseCommit.sha.slice(0, 7)}\n` +
+        `local: ${info.head.slice(0, 7)}${aheadOfRemote ? ' (ahead of remote)' : ''}\n` +
         `files: ${changedList}` +
-        (changes.length > 20 ? ` ...(+${changes.length - 20})` : ''),
+        (effectiveChanges.length > 20 ? ` ...(+${effectiveChanges.length - 20})` : ''),
     tree: newTree.sha,
     parents: [baseCommit.sha],
     author,
@@ -149,10 +194,14 @@ export async function publishWorkspace(client, options) {
     branch,
     baseRef,
     baseSha: baseCommit.sha,
+    localHead: info.head,
+    // True when the local tree was ahead of the remote base, i.e. the snapshot
+    // carries commits that were never pushed.
+    aheadOfRemote,
     sha: commit.sha,
     ref: branch,
-    changed: changes.length,
-    summary,
+    changed: effectiveChanges.length,
+    summary: effectiveSummary,
     uploadedBytes,
     published: true,
   }
