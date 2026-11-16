@@ -1,0 +1,49 @@
+{
+  "name": "build-runner-mcp",
+  "version": "1.0.0",
+  "description": "把 GitHub Actions 当作云端构建机：AI 指定仓库+分支+命令，在远端执行并把 stdout/stderr 与真实退出码原样取回。附出包（打包+Release）与不提交即可构建的快照模式。",
+  "type": "module",
+  "bin": {
+    "build-runner-mcp": "src/server.js"
+  },
+  "main": "src/server.js",
+  "exports": {
+    ".": "./src/server.js",
+    "./runner": "./src/runner.js",
+    "./release": "./src/release.js",
+    "./snapshot": "./src/snapshot.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/logs.test.js test/workspace.test.js",
+    "smoke": "node tools/mcp-client.mjs list"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "github-actions",
+    "remote-build",
+    "cloud-build",
+    "ci",
+    "ai-agent",
+    "dockerless"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ckarefulon/Build-Runner-MCP.git"
+  },
+  "homepage": "https://github.com/Ckarefulon/Build-Runner-MCP#readme",
+  "bugs": {
+    "url": "https://github.com/Ckarefulon/Build-Runner-MCP/issues"
+  },
+  "private": false
+}
