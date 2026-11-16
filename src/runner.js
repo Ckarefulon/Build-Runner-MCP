@@ -16,8 +16,10 @@ import { publishWorkspace, buildBranchName } from './snapshot.js'
 export const RUNNER_REPO_FALLBACK = 'Ckarefulon/Build-Runner'
 export const WORKFLOW_FILE = 'run.yml'
 
-const POLL_MIN_MS = 1500
-const POLL_MAX_MS = 8000
+const POLL_MIN_MS = 1000
+// Kept low on purpose: this is pure scheduling slack between the job finishing
+// and the caller learning about it.
+const POLL_MAX_MS = 2500
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -257,6 +259,12 @@ export async function waitForRun(client, engine, runId, options = {}) {
   const { maxWaitMs = 30 * 60 * 1000, tag, receipt = {}, maxOutputChars } = options
   const context = client
   const deadline = Date.now() + maxWaitMs
+
+  // Polling cadence is a real cost, not a detail: a growing interval means the
+  // caller waits up to POLL_MAX_MS after the job already finished. Measured on
+  // a ~50s run, scheduling slack accounted for ~40s of wall clock. Keep the
+  // interval short and constant-ish; the runs API is cheap and well within
+  // rate limits for the ~40 calls a 2-minute build needs.
   let delay = POLL_MIN_MS
   let run = await context.getRun(engine.owner, engine.repo, runId)
 
@@ -272,11 +280,13 @@ export async function waitForRun(client, engine, runId, options = {}) {
         conclusion: null,
         exitCode: null,
         output: '',
-        note: `等待超时（${Math.round(maxWaitMs / 1000)} 秒）但任务仍在运行。可用 build_runner_status 继续查询 runId=${runId}。`,
+        note: `等待超时（${Math.round(maxWaitMs / 1000)} 秒）但任务仍在运行。可用 status 工具继续查询 runId=${runId}。`,
       }
     }
     await sleep(delay)
-    delay = Math.min(Math.round(delay * 1.3), POLL_MAX_MS)
+    // Ramp gently and cap low: after a few seconds the run is either moments
+    // from done or minutes away, and a 2s poll costs far less than being slow.
+    delay = Math.min(Math.round(delay * 1.15), 2500)
     run = await context.getRun(engine.owner, engine.repo, runId)
   }
 
