@@ -91,6 +91,24 @@ async function api(method, path, body, tok) {
   return { status: response.status, ok: response.ok, body: parsed }
 }
 
+/** Every blob path on the branch, recursively. */
+async function listRemote(branch, tok) {
+  const paths = []
+  const head = await api('GET', `/repos/${REPO_SLUG}/git/ref/heads/${branch}`, null, tok)
+  if (!head.ok) return paths
+  const tree = await api(
+    'GET',
+    `/repos/${REPO_SLUG}/git/trees/${head.body.object.sha}?recursive=1`,
+    null,
+    tok
+  )
+  if (!tree.ok || !Array.isArray(tree.body?.tree)) return paths
+  for (const entry of tree.body.tree) {
+    if (entry.type === 'blob') paths.push(entry.path)
+  }
+  return paths
+}
+
 async function main() {
   const tok = token()
   const files = walk(ROOT).map(full => ({
@@ -124,6 +142,35 @@ async function main() {
   let created = 0
   let updated = 0
   let skipped = 0
+  let deleted = 0
+
+  // Mirror mode: remove remote files that no longer exist locally, so a repo
+  // that drops a directory actually loses it. Without this, deleted files
+  // linger forever and the remote silently drifts from the working tree.
+  if (process.argv.includes('--mirror')) {
+    const localPaths = new Set(files.map(file => file.rel))
+    const remotePaths = await listRemote(BRANCH, tok)
+    for (const path of remotePaths) {
+      if (localPaths.has(path)) continue
+      const removed = await api(
+        'DELETE',
+        `/repos/${REPO_SLUG}/contents/${path.split('/').map(encodeURIComponent).join('/')}`,
+        { message: `chore: remove ${path}`, sha: (await api(
+          'GET',
+          `/repos/${REPO_SLUG}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(BRANCH)}`,
+          null,
+          tok
+        )).body.sha, branch: BRANCH },
+        tok
+      )
+      if (removed.ok) {
+        deleted += 1
+        console.log(`  deleted ${path}`)
+      } else {
+        console.log(`  FAILED to delete ${path} (${removed.status})`)
+      }
+    }
+  }
 
   for (const file of files) {
     const content = readFileSync(file.full)
@@ -158,7 +205,9 @@ async function main() {
   }
 
   const head = await api('GET', `/repos/${REPO_SLUG}/commits/${BRANCH}`, null, tok)
-  console.log(`\ndone: ${created} created, ${updated} updated, ${skipped} unchanged`)
+  console.log(
+    `\ndone: ${created} created, ${updated} updated, ${skipped} unchanged, ${deleted} deleted`
+  )
   console.log(`head: ${head.body?.sha ?? '?'} ${head.body?.commit?.message?.split('\n')[0] ?? ''}`)
   console.log(`url : https://github.com/${REPO_SLUG}/tree/${BRANCH}`)
 }
