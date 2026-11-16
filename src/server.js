@@ -198,6 +198,17 @@ const TOOLS = [
           type: 'string',
           description: '接收产物的分支，默认 builds。用独立分支避免污染你的工作分支。',
         },
+        workspaceDir: {
+          type: 'string',
+          description:
+            '本地 git 工作区目录。设置后「出包」会先发布该目录的**未提交改动和未推送提交**到快照分支，' +
+            '再从那里构建打包。不设此项时，云端只会签出已推送的代码 —— 若你的修复还没 push，' +
+            '包会基于旧代码构建。',
+        },
+        workspaceBranch: {
+          type: 'string',
+          description: '快照分支名，默认 build-runner（与 run 工具共用）。',
+        },
         shell: { type: 'string', enum: ['bash', 'pwsh', 'python'], description: '解释器，默认 bash' },
         runner: { type: 'string', description: 'runner 标签，默认 ubuntu-latest' },
         setup: { type: 'string', description: '构建前的准备命令' },
@@ -308,6 +319,8 @@ async function invoke(toolName, args = {}) {
         timeoutMinutes: args.timeoutMinutes,
         wait: args.wait !== false,
         maxWaitMs: args.maxWaitMs,
+        workspaceDir: args.workspaceDir,
+        workspaceBranch: args.workspaceBranch,
       })
     }
     case 'status': {
@@ -341,6 +354,27 @@ function render(value) {
       lines.push(`❌ 出包失败（${value.conclusion ?? '未完成'}）`)
     }
     lines.push(`仓库 ${value.repo ?? '?'} @ ${value.ref ?? '?'}${value.revision ? ` (${value.revision})` : ''}`)
+
+    // Snapshot provenance. A release built from an older remote commit while the
+    // author's fix sat unpushed is exactly the failure this block prevents: the
+    // package looked fine, but contained none of the fix.
+    if (value.workspace) {
+      const ws = value.workspace
+      if (ws.published) {
+        lines.push(
+          `快照：${ws.changed} 处改动 → 分支 ${ws.branch}` +
+            (ws.aheadOfRemote
+              ? `（含未推送提交，本地 HEAD ${String(ws.localHead ?? '').slice(0, 7)}）`
+              : '')
+        )
+      } else if (ws.changed === 0) {
+        lines.push(
+          `⚠️ 快照为空：工作区与远端基准一致，包基于 ${String(ws.baseSha ?? '').slice(0, 7)} 构建`
+        )
+      }
+    } else if (value.succeeded) {
+      lines.push('提示：未指定 workspaceDir，包基于已推送的代码构建')
+    }
     if (value.package) {
       const size = value.package.bytes ? `${(value.package.bytes / 1024).toFixed(1)} KiB` : '?'
       lines.push(`包 ${value.package.name}  ${size}`)
