@@ -119,10 +119,27 @@ async function main() {
   // Guard against publishing the wrong directory. Running this from a parent of
   // the repo (or from a home directory) silently uploads every unrelated file,
   // which is exactly what happened once. A publish root must look like a
-  // project: it needs a package.json or .github, and must not contain many
-  // sibling-directory trees.
-  const looksLikeProject = files.some(file => file.rel === 'package.json')
-    || files.some(file => file.rel.startsWith('.github/'))
+  // project: it needs a recognisable marker at its root, and must not contain a
+  // pile of unrelated sibling directories.
+  const PROJECT_MARKERS = [
+    'package.json',
+    'build.gradle.kts',
+    'build.gradle',
+    'settings.gradle.kts',
+    'pom.xml',
+    'Cargo.toml',
+    'go.mod',
+    'pyproject.toml',
+    'requirements.txt',
+    'pubspec.yaml',
+    'Makefile',
+    'CMakeLists.txt',
+    'README.md',
+    '.gitignore',
+  ]
+  const looksLikeProject =
+    files.some(file => PROJECT_MARKERS.includes(file.rel)) ||
+    files.some(file => file.rel.startsWith('.github/'))
   const topLevelDirs = new Set(
     files.map(file => file.rel.split('/')[0]).filter(name => files.some(f => f.rel.startsWith(`${name}/`)))
   )
@@ -130,7 +147,7 @@ async function main() {
     console.error(
       `拒绝发布：${ROOT}\n` +
         `  看起来不是项目根目录（顶层目录 ${topLevelDirs.size} 个，` +
-        `package.json/.github ${looksLikeProject ? '存在' : '缺失'}）。\n` +
+        `项目标志文件 ${looksLikeProject ? '存在' : '缺失'}）。\n` +
         '  请在目标仓库目录内运行，或用 --force 明确覆盖。'
     )
     if (!process.argv.includes('--force')) process.exit(1)
