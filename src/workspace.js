@@ -174,6 +174,139 @@ export function collectChanges(dir) {
   return { changes, head, toplevel, branch }
 }
 
+/** Whether the local repo contains a given commit (needed before diffing it). */
+export function hasCommit(dir, sha) {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], {
+      cwd: dir,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Try to obtain a commit the local clone does not have yet.
+ *
+ * A workspace snapshot diffs against the REMOTE base, and a clone that has not
+ * fetched recently may not contain it. Asking the user to run `git fetch`
+ * themselves turns a solvable situation into a failure, so attempt it here.
+ * Never fatal: if the fetch fails (no network, auth, read-only remote) the
+ * caller still gets `false` and can produce a precise error.
+ */
+export function fetchCommit(dir, sha, { remote = 'origin', timeoutMs = 30000 } = {}) {
+  if (hasCommit(dir, sha)) return true
+  const attempts = [
+    ['fetch', '--depth=1', remote, sha],
+    ['fetch', remote, sha],
+    ['fetch', remote],
+  ]
+  for (const args of attempts) {
+    try {
+      execFileSync('git', args, {
+        cwd: dir,
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: timeoutMs,
+      })
+      if (hasCommit(dir, sha)) return true
+    } catch {
+      // try the next strategy
+    }
+  }
+  return hasCommit(dir, sha)
+}
+
+/**
+ * Files that differ between the local HEAD and a KNOWN remote commit.
+ *
+ * Why this exists: `git status` only reports changes relative to the local HEAD.
+ * A commit that exists locally but was never pushed is invisible to it, so a
+ * workspace snapshot built on the remote branch silently omits it — the release
+ * then ships code that predates the fix while looking perfectly successful.
+ *
+ * `git diff --name-status -z <remoteSha>` compares the remote commit against the
+ * local working tree in one shot, which is exactly the relationship a snapshot
+ * needs. baseSha must be reachable locally; callers fetch it first.
+ *
+ * @returns {{changes:Array, head:string, baseSha:string, toplevel:string}}
+ */
+export function collectChangesAgainst(dir, baseSha) {
+  if (!isGitRepo(dir)) {
+    throw new GitError(`不是 git 仓库：${dir}`)
+  }
+  const { toplevel, head } = repoInfo(dir)
+
+  const changes = []
+  const seen = new Set()
+
+  // `git diff <commit>` compares the commit against tracked paths only. A file
+  // the agent just created is UNTRACKED, so it would be missing from the diff —
+  // and an agent that writes a new file and immediately builds it would get a
+  // snapshot without that file. Untracked files are therefore collected
+  // separately and merged in.
+  const raw = git(dir, ['diff', '--name-status', '-z', '--no-renames', baseSha, '--'], {
+    buffer: true,
+  })
+  const parts = Buffer.from(raw).toString('utf8').split('\u0000').filter(part => part !== '')
+  // --name-status -z emits: <STATUS>\0<path>\0 (one entry per file).
+  for (let i = 0; i < parts.length - 1; i += 2) {
+    const status = parts[i].trim()
+    const path = parts[i + 1]
+    if (!status || !path) continue
+    const normalized = path.replace(/\\/g, '/')
+    if (isIgnoredByPolicy(normalized)) continue
+
+    if (status.startsWith('D')) {
+      changes.push({ path: normalized, kind: 'deleted' })
+      seen.add(normalized)
+      continue
+    }
+    const absolute = join(toplevel, path)
+    let stats
+    try {
+      stats = statSync(absolute)
+    } catch {
+      changes.push({ path: normalized, kind: 'deleted' })
+      seen.add(normalized)
+      continue
+    }
+    if (!stats.isFile()) continue
+    const content = readFileSync(absolute)
+    changes.push({
+      path: normalized,
+      kind: status.startsWith('A') ? 'added' : 'modified',
+      content,
+      size: content.length,
+    })
+    seen.add(normalized)
+  }
+
+  // Untracked files, respecting .gitignore (build outputs and secrets stay home).
+  const untrackedRaw = git(dir, ['ls-files', '--others', '--exclude-standard', '-z'], {
+    buffer: true,
+  })
+  for (const path of Buffer.from(untrackedRaw).toString('utf8').split('\u0000')) {
+    if (path === '') continue
+    const normalized = path.replace(/\\/g, '/')
+    if (seen.has(normalized) || isIgnoredByPolicy(normalized)) continue
+    const absolute = join(toplevel, path)
+    let stats
+    try {
+      stats = statSync(absolute)
+    } catch {
+      continue
+    }
+    if (!stats.isFile()) continue
+    const content = readFileSync(absolute)
+    changes.push({ path: normalized, kind: 'added', content, size: content.length })
+    seen.add(normalized)
+  }
+
+  return { changes, head, baseSha, toplevel }
+}
+
 /** Short human summary used in tool output. */
 export function summarizeChanges(changes) {
   const counts = { added: 0, modified: 0, deleted: 0, renamed: 0 }
