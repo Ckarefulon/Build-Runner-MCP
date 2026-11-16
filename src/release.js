@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { parseSlug } from './github.js'
 import { parseJobLog, clip, summarizeFailure } from './logs.js'
 import { RUNNER_REPO_FALLBACK, normalizeShell, resolveTargets, verifyRef } from './runner.js'
+import { publishWorkspace, buildBranchName } from './snapshot.js'
 
 export const RELEASE_WORKFLOW_FILE = 'release.yml'
 
@@ -87,6 +88,9 @@ export async function releaseArtifacts(client, options) {
     maxWaitMs = 30 * 60 * 1000,
     maxOutputChars,
     wait = true,
+    // Workspace mode: package the local working tree instead of a pushed ref.
+    workspaceDir,
+    workspaceBranch,
   } = options
 
   const pathText = Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? '')
@@ -106,13 +110,39 @@ export async function releaseArtifacts(client, options) {
     await verifyRef(client, { owner: target.owner, repo: target.repo, ref: target.ref })
   }
 
+  // Publishing the workspace BEFORE dispatching is what makes `release` able to
+  // ship uncommitted (or unpushed) work. Without this branch, the workflow
+  // checked out the remote ref and packaged whatever happened to be pushed
+  // there — so a caller who had just fixed something got a package built from
+  // older code, with no indication anything was wrong.
+  let workspace = null
+  let effectiveRef = target.ref
+  if (workspaceDir) {
+    workspace = await publishWorkspace(client, {
+      dir: workspaceDir,
+      repo: target.slug,
+      baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
+      branch: workspaceBranch ?? buildBranchName(),
+      message: `build-runner: workspace snapshot for release ${new Date().toISOString()}`,
+    })
+
+    if (workspace.published) {
+      effectiveRef = workspace.branch
+    } else if (workspace.sha !== workspace.baseSha) {
+      // Defensive: a non-published result that still moved means the snapshot
+      // was already current; build the branch so the caller gets what they asked
+      // for rather than an unrelated ref.
+      effectiveRef = workspace.branch
+    }
+  }
+
   const tag = `brr-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   const createdAt = Date.now()
 
   const inputs = {
     tag,
     repo: target.slug,
-    ref: target.ref,
+    ref: effectiveRef,
     command,
     artifact_paths: pathText,
     package_name: packageName ?? '',
@@ -127,7 +157,9 @@ export async function releaseArtifacts(client, options) {
     runner,
     setup,
     timeout_minutes: String(timeoutMinutes),
-    fetch_depth: String(fetchDepth ?? 1),
+    // A snapshot commit sits on top of the real base, so keep enough history for
+    // version numbers derived from git to stay correct.
+    fetch_depth: String(fetchDepth !== undefined ? fetchDepth : workspace ? 0 : 1),
   }
 
   await client.dispatch(engine.owner, engine.repo, RELEASE_WORKFLOW_FILE, {
@@ -138,12 +170,27 @@ export async function releaseArtifacts(client, options) {
   const receipt = {
     tag,
     repo: target.slug,
-    ref: target.ref,
+    ref: effectiveRef,
     shell: normalizedShell,
     runner,
     artifactPaths: pathText,
     commitBranch: commitToRepo === false ? null : (commitBranch ?? 'builds'),
     dispatchedAt: new Date(createdAt).toISOString(),
+    ...(workspace
+      ? {
+          workspace: {
+            branch: workspace.branch,
+            changed: workspace.changed,
+            summary: workspace.summary,
+            baseSha: workspace.baseSha,
+            sha: workspace.sha,
+            localHead: workspace.localHead ?? null,
+            aheadOfRemote: workspace.aheadOfRemote === true,
+            published: workspace.published,
+            note: workspace.note,
+          },
+        }
+      : {}),
   }
 
   const run = await locateRun(client, engine, tag, { expectCreatedAfter: createdAt })
