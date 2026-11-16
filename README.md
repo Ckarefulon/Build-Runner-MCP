@@ -153,6 +153,23 @@ tar 包上传做不到这一点。
 - 目标仓库会多出一个 `build-runner` 分支，用 `workspace_reset` 可清理。
 - 结果是 **预检** 语义（带 `mode: snapshot`），不等同于已推送代码的构建。
 
+### 未推送的提交也能带上
+
+快照**不只是未提交改动**。它对比的是「本地工作树」与「远端基准提交」，
+所以你**已经 commit 但还没 push** 的修复同样会被包含。
+
+这一点很重要：如果一个包基于旧代码构建，表面看完全成功，实际却没有任何修复。
+
+```
+本地 HEAD 47414be（含修复，未推送）
+远端 main 9ab767c（旧代码）
+        ↓ 快照对比的是这两者
+包内容 = FIXED-BY-COMMIT   ← 修复在里面
+```
+
+返回结果里的 `workspace.aheadOfRemote: true` 就是明确的信号。
+本地缺少远端基准提交时会**自动 fetch**，而不是直接失败。
+
 ---
 
 ## 出包
@@ -162,9 +179,14 @@ tar 包上传做不到这一点。
   "repo": "owner/name",
   "command": "gradle assembleDebug",
   "artifactPaths": "app/build/outputs/apk/**",
-  "commitBranch": "builds"
+  "commitBranch": "builds",
+  "workspaceDir": "/path/to/repo"   // ← 加这个，包才会包含未推送的修复
 }
 ```
+
+> **出包时务必传 `workspaceDir`。** 不传的话云端只签出**已推送**的代码；
+> 如果你的修复还留在本地（未提交或未推送），包会基于旧代码构建，
+> 而且**看起来完全成功**。返回结果会明确标注是哪种情况。
 
 云端构建 → 打包（zip + SHA256）→ 提交到目标仓库 `builds` 分支根目录 →
 在引擎仓库发 GitHub Release 并附资产。**打包在云端完成**，产物不下载回本机。
