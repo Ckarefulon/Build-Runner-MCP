@@ -115,6 +115,27 @@ async function main() {
     full,
     rel: relative(ROOT, full).split(sep).join('/'),
   }))
+
+  // Guard against publishing the wrong directory. Running this from a parent of
+  // the repo (or from a home directory) silently uploads every unrelated file,
+  // which is exactly what happened once. A publish root must look like a
+  // project: it needs a package.json or .github, and must not contain many
+  // sibling-directory trees.
+  const looksLikeProject = files.some(file => file.rel === 'package.json')
+    || files.some(file => file.rel.startsWith('.github/'))
+  const topLevelDirs = new Set(
+    files.map(file => file.rel.split('/')[0]).filter(name => files.some(f => f.rel.startsWith(`${name}/`)))
+  )
+  if (!looksLikeProject || topLevelDirs.size > 12) {
+    console.error(
+      `拒绝发布：${ROOT}\n` +
+        `  看起来不是项目根目录（顶层目录 ${topLevelDirs.size} 个，` +
+        `package.json/.github ${looksLikeProject ? '存在' : '缺失'}）。\n` +
+        '  请在目标仓库目录内运行，或用 --force 明确覆盖。'
+    )
+    if (!process.argv.includes('--force')) process.exit(1)
+  }
+
   console.log(`publishing ${files.length} files to ${REPO_SLUG}@${BRANCH}`)
 
   // Make sure the branch exists before writing a single file.
