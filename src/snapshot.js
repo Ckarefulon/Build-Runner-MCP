@@ -26,9 +26,13 @@
  *   - .gitignore rules still apply, so build outputs and secrets never leave.
  */
 
-import { createWorkspacePatch } from './patch.js'
+import { createWorkspacePatch, publishPatchToEngine } from './patch.js'
 import { collectChanges, parseRemote, summarizeChanges, isGitRepo, repoInfo } from './workspace.js'
 import { parseSlug } from './github.js'
+
+// Inline dispatch inputs are capped near 61 KiB (measured), so anything larger
+// travels via a disposable branch in the engine repo.
+const INLINE_PATCH_LIMIT = 48000
 
 /** Kept for API compatibility with earlier callers. */
 export function buildBranchName(prefix = 'build-runner') {
@@ -45,7 +49,7 @@ export function buildBranchName(prefix = 'build-runner') {
  *            localHead:string, aheadOfRemote:boolean, files:Array}}
  */
 export async function prepareWorkspace(client, options) {
-  const { dir, repo, baseRef, dryRun = false } = options
+  const { dir, repo, baseRef, dryRun = false, engine } = options
 
   const target = parseSlug(repo)
   if (!target) throw new Error(`无法解析目标仓库：${repo}`)
@@ -101,7 +105,21 @@ export async function prepareWorkspace(client, options) {
     return { ...result, patch: null, dryRun: true }
   }
 
-  return { ...result, patch }
+  // Decide the transport: a small patch can ride in the dispatch input, but a
+  // realistic one exceeds the ~61 KiB limit, so it goes to a disposable branch
+  // in the ENGINE repo (never the target repo).
+  if (patch.length <= INLINE_PATCH_LIMIT || !engine) {
+    return { ...result, patch, patchRef: null, patchInline: true }
+  }
+
+  const branch = `br-patch/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  await publishPatchToEngine(client, {
+    owner: engine.owner,
+    repo: engine.repo,
+    branch,
+    patch,
+  })
+  return { ...result, patch: null, patchRef: branch, patchInline: false }
 }
 
 /**
