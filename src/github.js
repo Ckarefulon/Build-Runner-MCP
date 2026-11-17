@@ -9,12 +9,18 @@ const API = 'https://api.github.com'
 const API_VERSION = '2022-11-28'
 
 export class GitHubError extends Error {
-  constructor(message, { status, body, url } = {}) {
+  constructor(message, { status, body, url, method, path, upstream, reachable } = {}) {
     super(message)
     this.name = 'GitHubError'
     this.status = status
     this.body = body
     this.url = url
+    this.method = method
+    this.path = path
+    // True when the failure came from a local proxy/gateway rather than GitHub.
+    this.upstream = upstream
+    // False when the request never got a response at all (socket/TLS failure).
+    this.reachable = reachable
   }
 }
 
@@ -44,27 +50,64 @@ export function createClient({ token, baseUrl = API } = {}) {
     }
     if (body !== undefined) headers['Content-Type'] = 'application/json'
 
-    // Retry only on the statuses GitHub actually uses for transient trouble.
+    // Which write requests are safe to repeat is a per-endpoint question, and
+    // getting it wrong either duplicates objects (commits) or gives up on a
+    // transient proxy 502 (ref updates).
+    //
+    //   GET/HEAD                  — always retried
+    //   POST /git/blobs           — content-addressed: same bytes, same SHA
+    //   PATCH/POST /git/refs      — sets a ref to a KNOWN sha; idempotent
+    //   POST /git/trees,/commits  — creates a new object each time; NOT retried
+    const idempotent = method === 'GET' || method === 'HEAD'
+    const retryableWrite =
+      (method === 'POST' && /\/git\/blobs$/.test(path)) ||
+      /\/git\/refs(\/|$)/.test(path)
+    const maxAttempts = idempotent ? 4 : retryableWrite ? 3 : 1
     let lastError
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let response
       try {
         response = await fetch(url, {
           method,
-          headers,
+          headers:
+            attempt > 0
+              // A retry after a connection-level failure must NOT reuse the
+              // pooled socket: through an inspecting proxy that socket is what
+              // failed, and undici would hand back the same dead one. Asking for
+              // `Connection: close` forces a fresh TCP/TLS handshake.
+              ? { ...headers, Connection: 'close' }
+              : headers,
           body: body === undefined ? undefined : JSON.stringify(body),
           redirect,
         })
       } catch (error) {
-        lastError = new GitHubError(`请求 GitHub 失败：${error.message}`, { url })
-        await sleep(400 * (attempt + 1))
-        continue
+        // No response at all: the socket died before/while sending. Retrying is
+        // safe even for non-idempotent writes only when nothing was committed,
+        // which we cannot know — so writes still stop here unless explicitly
+        // marked retryable above (content-addressed blobs).
+        lastError = new GitHubError(
+          `${method} ${path} 连接失败：${error.message}` +
+            (idempotent || retryableWrite ? '' : '（写操作不重试，避免重复创建）'),
+          { url, method, path, reachable: false }
+        )
+        if (attempt + 1 < maxAttempts) {
+          await sleep(600 * (attempt + 1))
+          continue
+        }
+        throw lastError
       }
 
-      if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
+      if ((idempotent || retryableWrite) && (response.status === 429 || response.status >= 500)) {
         const retryAfter = Number(response.headers.get('retry-after'))
-        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 800 * (attempt + 1))
-        lastError = new GitHubError(`GitHub 返回 ${response.status}`, { status: response.status, url })
+        await sleep(
+          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 700 * (attempt + 1)
+        )
+        lastError = new GitHubError(`${method} ${path} 返回 ${response.status}`, {
+          status: response.status,
+          url,
+          method,
+          path,
+        })
         continue
       }
 
@@ -91,15 +134,23 @@ export function createClient({ token, baseUrl = API } = {}) {
       }
       if (!response.ok) {
         const message = parsed && typeof parsed === 'object' && parsed.message ? parsed.message : text
-        throw new GitHubError(`GitHub 返回 ${response.status}：${String(message).slice(0, 300)}`, {
-          status: response.status,
-          body: parsed,
-          url,
-        })
+        // Distinguish an upstream failure (usually the local inspecting proxy)
+        // from a real GitHub answer. Without this the caller only sees
+        // "GitHub 返回 502" and cannot tell where to look.
+        const upstream =
+          typeof message === 'string' && /upstream request failed|bad gateway|gateway time-?out/i.test(message)
+        const hint = upstream
+          ? `\n→ 这是本地代理/网关返回的，不是 GitHub 的响应。` +
+            `重试通常有效；若持续失败，检查代理设置或改用直连。`
+          : ''
+        throw new GitHubError(
+          `${method} ${path} 返回 ${response.status}：${String(message).slice(0, 200)}${hint}`,
+          { status: response.status, body: parsed, url, method, path, upstream }
+        )
       }
       return parsed
     }
-    throw lastError ?? new GitHubError('请求 GitHub 失败', { url })
+    throw lastError ?? new GitHubError(`${method} ${path} 请求失败`, { url, method, path })
   }
 
   return {
@@ -345,6 +396,10 @@ export function createClient({ token, baseUrl = API } = {}) {
      * deletes the branch when done.
      */
     async publishBlobFile(owner, repo, { branch, path, content, message }) {
+      // Each step is retried by `request` where that is safe. A failure part-way
+      // leaves an unreferenced blob/tree behind — harmless garbage that GitHub
+      // collects, and far better than failing the caller's build because a proxy
+      // hiccuped once.
       const head = await request('GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`).catch(
         error => {
           if (error instanceof GitHubError && error.status === 404) return null
@@ -370,6 +425,8 @@ export function createClient({ token, baseUrl = API } = {}) {
           parents: head ? [head.object.sha] : [],
         },
       })
+      // Ref update retries internally (idempotent): this is the call that most
+      // often hits a proxy 502, and repeating it with the same sha is harmless.
       if (head) {
         await request('PATCH', `/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
           body: { sha: commit.sha, force: true },
