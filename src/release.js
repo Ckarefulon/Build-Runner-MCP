@@ -163,7 +163,10 @@ export async function releaseArtifacts(client, options) {
   const receipt = {
     tag,
     repo: target.slug,
-    ref: effectiveRef,
+    // The run checks out the caller's own ref and applies the patch on top, so
+    // the effective ref IS target.ref. (A previous revision published a snapshot
+    // branch and tracked it here; that variable is gone with the branch mode.)
+    ref: target.ref,
     shell: normalizedShell,
     runner,
     artifactPaths: pathText,
