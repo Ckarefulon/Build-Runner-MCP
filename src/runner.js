@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { createClient, GitHubError, parseSlug } from './github.js'
 import { parseJobLog, clip, summarizeFailure } from './logs.js'
 import { prepareWorkspace } from './snapshot.js'
@@ -53,33 +54,80 @@ export async function resolveTargets(client, { repo, ref, runnerRepo, runnerRef 
 }
 
 /**
- * Fail fast on an unknown branch/tag/commit, with the close matches listed:
- * an AI that typed `mian` should be told `main` exists instead of getting a
- * checkout failure from inside the job.
+ * Resolve a ref to something the cloud can actually check out.
+ *
+ * A branch that exists only locally (committed but not pushed) is a normal state
+ * in the "AI commits, nobody pushes" workflow. Rejecting it leaves the caller
+ * stuck, so instead the ref is MAPPED onto the repository's default branch and
+ * the local commits travel in the patch — the run still sees the right code,
+ * and the caller is told exactly what happened.
+ *
+ * @returns {{kind:'sha'|'branch', ref:string, remappedFrom?:string, note?:string}}
  */
-export async function verifyRef(client, { owner, repo, ref }) {
+export async function verifyRef(client, { owner, repo, ref, localBranchExists = false }) {
   if (/^[0-9a-f]{7,40}$/i.test(ref)) return { kind: 'sha', ref }
+
   try {
     await client.getBranch(owner, repo, ref)
     return { kind: 'branch', ref }
   } catch (error) {
     if (!(error instanceof GitHubError) || error.status !== 404) throw error
   }
+
+  let defaultBranch = null
   try {
     const repoInfo = await client.getRepo(owner, repo)
-    if (repoInfo?.default_branch === ref) return { kind: 'branch', ref }
+    defaultBranch = repoInfo?.default_branch ?? null
+    if (defaultBranch === ref) return { kind: 'branch', ref }
   } catch {
-    // fall through to the error below
+    // fall through
   }
-  const suggestions = []
+
+  // Branch is not on the remote. If it exists locally, the caller's work is
+  // still publishable: use the default branch as the base and let the workspace
+  // patch carry the missing commits.
+  if (localBranchExists && defaultBranch) {
+    return {
+      kind: 'branch',
+      ref: defaultBranch,
+      remappedFrom: ref,
+      note:
+        `分支 "${ref}" 只存在于本地（未推送）。已改用默认分支 ${defaultBranch} 作为基准，` +
+        '本地提交会通过补丁一起带上云端。',
+    }
+  }
+
+  const hint = defaultBranch ? `（该仓库默认分支是 ${defaultBranch}）` : ''
+  throw new Error(
+    `仓库 ${owner}/${repo} 上找不到分支/标签 "${ref}"${hint}\n` +
+      '如果这个分支只在本地存在，请同时传 workspaceDir：那样本地提交会以补丁形式带上云端，' +
+      'ref 改用已存在的分支即可。'
+  )
+}
+
+/** Whether a branch (or any ref) by that name exists in the local clone. */
+export function localGitBranchExists(dir, branch) {
   try {
-    const repoInfo = await client.getRepo(owner, repo)
-    if (repoInfo?.default_branch) suggestions.push(repoInfo.default_branch)
+    execFileSync('git', ['rev-parse', '--verify', `refs/heads/${branch}`], {
+      cwd: dir,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
   } catch {
-    // ignore
+    return false
   }
-  const hint = suggestions.length > 0 ? `（该仓库默认分支是 ${suggestions.join('、')}）` : ''
-  throw new Error(`仓库 ${owner}/${repo} 上找不到分支/标签 "${ref}"${hint}`)
+}
+
+/** The local branch HEAD points at, used when the caller passed no ref. */
+function workspaceBaseFromLocal(dir) {
+  try {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf8',
+    }).trim()
+  } catch {
+    return null
+  }
 }
 
 /** Find the run for a tag, retrying until GitHub has indexed the dispatch. */
@@ -158,18 +206,37 @@ export async function runCommand(client, options) {
   })
 
   let workspace = null
+  let refNote = null
 
   // Snapshot mode: send a PATCH of the local changes instead of publishing a
   // branch. The target repository is never written to — the runner checks out
   // the caller's own branch and applies the diff.
+  let checkoutRef = target.ref
   if (verifyBranch && target.ref !== 'HEAD') {
-    await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
+    // A branch that only exists locally is a normal state for "commit but don't
+    // push": detect it so the ref can be remapped instead of rejected.
+    const localBranchExists = Boolean(
+      workspaceDir && localGitBranchExists(workspaceDir, target.ref)
+    )
+    const check = await verifyRef(context, {
+      owner: target.owner,
+      repo: target.repo,
+      ref: target.ref,
+      localBranchExists,
+    })
+    if (check.remappedFrom) {
+      checkoutRef = check.ref
+      refNote = check.note
+      console.error(`[build-runner] ${check.note}`)
+    }
   }
   if (workspaceDir) {
     workspace = await prepareWorkspace(context, {
       dir: workspaceDir,
       repo: target.slug,
-      baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
+      // The patch must be built against the SAME base the run will check out,
+      // otherwise the diff describes a tree the runner never has.
+      baseRef: checkoutRef === 'HEAD' ? (workspaceBaseFromLocal(workspaceDir) ?? 'HEAD') : checkoutRef,
       // Patches too large for a dispatch input are parked on a disposable branch
       // in the ENGINE repo — never the target.
       engine,
@@ -179,8 +246,6 @@ export async function runCommand(client, options) {
   // Always check out the caller's own ref. The patch is applied on top, so
   // history stays real (`git describe`, `rev-list --count`) and no synthetic
   // commit is needed.
-  const checkoutRef = target.ref
-
   const tag = `br-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   const createdAt = Date.now()
   const inputs = {
@@ -228,6 +293,10 @@ export async function runCommand(client, options) {
     command,
     dispatchedAt: new Date(createdAt).toISOString(),
     workflow: `https://github.com/${engine.slug}/actions/workflows/${WORKFLOW_FILE}`,
+    // Set when the requested branch existed only locally and the run had to use
+    // a different base. The caller must see this: the checked out ref differs
+    // from what they asked for.
+    ...(refNote ? { refNote, requestedRef: target.ref } : {}),
     ...(release ? { release: true } : {}),
     ...(workspace
       ? {
