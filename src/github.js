@@ -337,6 +337,52 @@ export function createClient({ token, baseUrl = API } = {}) {
       request('DELETE', `/repos/${owner}/${repo}/git/refs/${ref.replace(/^\/+/, '')}`),
 
     /**
+     * Publish a small file to a throwaway branch in THIS repository.
+     *
+     * `workflow_dispatch` inputs are capped at ~61 KiB (measured), which a real
+     * workspace patch easily exceeds — so the patch cannot travel as an input.
+     * A transient branch carries it instead; the runner fetches it, and the job
+     * deletes the branch when done.
+     */
+    async publishBlobFile(owner, repo, { branch, path, content, message }) {
+      const head = await request('GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`).catch(
+        error => {
+          if (error instanceof GitHubError && error.status === 404) return null
+          throw error
+        }
+      )
+      const blob = await request('POST', `/repos/${owner}/${repo}/git/blobs`, {
+        body: {
+          content: Buffer.from(content).toString('base64'),
+          encoding: 'base64',
+        },
+      })
+      const tree = await request('POST', `/repos/${owner}/${repo}/git/trees`, {
+        body: {
+          ...(head ? { base_tree: (await request('GET', `/repos/${owner}/${repo}/git/commits/${head.object.sha}`)).tree.sha } : {}),
+          tree: [{ path, mode: '100644', type: 'blob', sha: blob.sha }],
+        },
+      })
+      const commit = await request('POST', `/repos/${owner}/${repo}/git/commits`, {
+        body: {
+          message: message ?? 'build-runner: transient patch',
+          tree: tree.sha,
+          parents: head ? [head.object.sha] : [],
+        },
+      })
+      if (head) {
+        await request('PATCH', `/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
+          body: { sha: commit.sha, force: true },
+        })
+      } else {
+        await request('POST', `/repos/${owner}/${repo}/git/refs`, {
+          body: { ref: `refs/heads/${branch}`, sha: commit.sha },
+        })
+      }
+      return { branch, sha: commit.sha }
+    },
+
+    /**
      * Delete every file under a branch directory prefix. Used to reset the
      * workspace branch so a later run cannot see stale files from an earlier
      * one — otherwise "works in my AI session" stops meaning anything.
