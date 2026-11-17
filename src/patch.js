@@ -79,9 +79,18 @@ export function createWorkspacePatch(dir, baseSha) {
 
   try {
     git(dir, ['config', 'core.autocrlf', 'false'], { env })
-    // Seed the temp index from the BASE commit, not HEAD: that makes the diff
-    // represent "base -> working tree", which is exactly what the cloud needs.
-    git(dir, ['read-tree', baseSha], { env })
+    // Seed the temp index from HEAD, NOT from baseSha.
+    //
+    // `read-tree baseSha` followed by `add -A` produces "base -> working tree".
+    // That looks right until the working tree is clean: then it yields an EMPTY
+    // patch even though local HEAD contains commits the base does not have. The
+    // reported bug was exactly this — a committed-but-unpushed branch produced a
+    // patch with no commits in it.
+    //
+    // Seeding from HEAD makes the index describe the local tree as committed
+    // (plus any unstaged edits), and the diff against baseSha then includes
+    // unpushed commits AND working changes.
+    git(dir, ['read-tree', 'HEAD'], { env })
     git(dir, ['add', '-A'], { env })
     const patch = git(dir, ['diff', '--binary', '--cached', baseSha], {
       env,
