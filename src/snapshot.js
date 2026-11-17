@@ -122,13 +122,24 @@ export async function prepareWorkspace(client, options) {
   // never race on it — while leaving no garbage behind.
   const scope = `${target.owner}-${target.repo}`.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60)
   const branch = `br-patch/${scope}`
-  await publishPatchToEngine(client, {
+  const published = await publishPatchToEngine(client, {
     owner: engine.owner,
     repo: engine.repo,
     branch,
     patch,
   })
-  return { ...result, patch: null, patchRef: branch, patchInline: false }
+  // `transport` is reported so a caller debugging a proxy problem can see which
+  // of the two publish paths was used.
+  if (published.transport === 'contents') {
+    console.error('[build-runner] git-data 通道不可用，已改用 contents 通道发布补丁')
+  }
+  return {
+    ...result,
+    patch: null,
+    patchRef: branch,
+    patchInline: false,
+    transport: published.transport,
+  }
 }
 
 /**
