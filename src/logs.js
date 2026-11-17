@@ -85,10 +85,22 @@ export function parseJobLog(raw) {
   const hasSection = beginAt !== -1 && endAt !== -1
   const output = hasSection ? stripSyncLines(lines.slice(beginAt + 1, endAt)).join('\n') : ''
 
-  const joined = lines.join('\n')
-  const exitMatch = joined.match(MARKERS.exitCode)
-  const durationMatch = joined.match(MARKERS.duration)
-  const shellMatch = joined.match(MARKERS.shell)
+  // These markers also appear in the ECHOED step script, where the value is the
+  // literal shell expression (`BUILD-RUNNER-SHELL=$IN_SHELL`) rather than a real
+  // result. Taking the first match captures that echo, which is how a shell of
+  // `$IN_SHELL"` + ANSI residue ended up in the output. The genuine value is the
+  // LAST match, and ANSI must be stripped before matching.
+  const plain = lines.map(line => line.replace(ANSI, '')).join('\n')
+  const lastMatch = re => {
+    const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
+    let match = null
+    let found
+    while ((found = global.exec(plain)) !== null) match = found
+    return match
+  }
+  const exitMatch = lastMatch(MARKERS.exitCode)
+  const durationMatch = lastMatch(MARKERS.duration)
+  const shellMatch = lastMatch(MARKERS.shell)
 
   // The Report step prints `key=value` pairs; collect them so the caller can
   // prove which revision actually ran. GitHub echoes the step script first, so
