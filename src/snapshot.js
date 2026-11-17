@@ -69,14 +69,20 @@ export async function publishWorkspace(client, options) {
 
   const info = repoInfo(dir)
   const remoteSlug = parseRemote(info.remote)
-  if (
+  const remoteMismatch =
     remoteSlug &&
     `${remoteSlug.owner}/${remoteSlug.repo}`.toLowerCase() !==
       `${target.owner}/${target.repo}`.toLowerCase()
-  ) {
-    throw new Error(
-      `本地仓库的 origin 是 ${remoteSlug.owner}/${remoteSlug.repo}，与目标 ${target.owner}/${target.repo} 不一致。` +
-        '请确认 repo 参数，或检查目录是否选对。'
+  // A local clone whose origin is a DIFFERENT repository is legitimate (fork
+  // workflow: edit your fork, publish a package to upstream; or a sparse local
+  // checkout used purely as a source of files). Blocking it outright breaks a
+  // real use case, but saying nothing lets a genuine "wrong directory" mistake
+  // ship the wrong code — so warn loudly and continue.
+  if (remoteMismatch) {
+    console.error(
+      `[build-runner] 注意：本地 origin 是 ${remoteSlug.owner}/${remoteSlug.repo}，` +
+        `目标仓库是 ${target.owner}/${target.repo}。` +
+        '将把本地工作树发布到目标仓库的快照分支。'
     )
   }
 
