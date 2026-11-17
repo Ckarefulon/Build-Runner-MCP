@@ -104,12 +104,25 @@ const TOOLS = [
         workspaceDir: {
           type: 'string',
           description:
-            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动**发布到目标仓库的专用构建分支后构建。' +
-            '只有改动的文件会上传（GitHub 侧的基线树由 base_tree 拼接），所以仓库再大也不慢。',
+            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动和未推送的提交**做成补丁，' +
+            '云端签出你自己的分支后应用补丁再构建。目标仓库不会多出任何分支。',
         },
-        workspaceBranch: {
-          type: 'string',
-          description: '快照构建分支名，默认 build-runner。同一仓库复用，不污染日常分支。',
+        release: {
+          type: 'object',
+          description:
+            '在同一 job 内追加打包发版：命令成功后直接打包并发布 Release，**不需要再跑一次构建**。' +
+            '既省掉一次完整编译，也保证发出去的包就是刚刚验证过的那个。',
+          properties: {
+            artifactPaths: {
+              type: 'string',
+              description: '要打包的路径（逗号/换行分隔）。不填则用 run 的 artifactPaths。',
+            },
+            packageName: { type: 'string', description: '包名（不含扩展名）' },
+            releaseTag: { type: 'string', description: 'Release tag，默认同包名' },
+            releaseTitle: { type: 'string', description: 'Release 标题' },
+            releaseNotes: { type: 'string', description: '附加说明' },
+            draft: { type: 'boolean', description: '是否发成草稿，默认 false' },
+          },
         },
       },
       required: ['repo', 'command'],
@@ -273,6 +286,7 @@ async function invoke(toolName, args = {}) {
         maxOutputChars: args.maxOutputChars,
         workspaceDir: args.workspaceDir,
         workspaceBranch: args.workspaceBranch,
+        release: args.release,
       })
     }
     case 'prepare_workspace': {
@@ -488,6 +502,17 @@ function render(value) {
       lines.push('')
       lines.push('----- 产物 -----')
       for (const item of value.artifacts) lines.push(`${item.name} (${item.sizeBytes} B)`)
+    }
+    // Released artifacts, when the run also published.
+    if (value.package) {
+      lines.push('')
+      lines.push('----- 发布包 -----')
+      const size = value.package.bytes ? `${(value.package.bytes / 1024).toFixed(1)} KiB` : '?'
+      lines.push(`${value.package.name}  ${size}`)
+      if (value.package.sha256) lines.push(`SHA256 ${value.package.sha256}`)
+    }
+    if (value.release) {
+      lines.push(`Release ${value.release.tag ?? ''} ${value.release.url ?? ''}`)
     }
     if (value.note) {
       lines.push('')
