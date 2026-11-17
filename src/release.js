@@ -182,6 +182,8 @@ export async function releaseArtifacts(client, options) {
             localHead: workspace.localHead ?? null,
             aheadOfRemote: workspace.aheadOfRemote === true,
             patchBytes: workspace.patchBytes ?? 0,
+            patchRef: workspace.patchRef ?? null,
+            transport: workspace.transport ?? (workspace.patchInline ? 'inline' : null),
             note: workspace.note,
           },
         }
