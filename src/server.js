@@ -182,12 +182,6 @@ const TOOLS = [
           type: 'string',
           description: '包名（不含扩展名），默认 <仓库名>-<短SHA>',
         },
-        packageSuffix: {
-          type: 'string',
-          description:
-            '变体后缀，放在扩展名之前：传 "debug" 得到 app.debug.apk（而不是 app.apk.debug）。' +
-            '不传时自动推断：命令里出现 assembleDebug / Debug 就自动加 debug。传空字符串可强制不加以便覆盖推断。',
-        },
         releaseTag: { type: 'string', description: 'Release tag，默认同包名' },
         releaseRepo: {
           type: 'string',
@@ -312,7 +306,6 @@ async function invoke(toolName, args = {}) {
         command: args.command ?? '',
         artifactPaths: args.artifactPaths,
         packageName: args.packageName,
-        packageSuffix: args.packageSuffix,
         releaseTag: args.releaseTag,
         releaseRepo: args.releaseRepo,
         releaseTitle: args.releaseTitle,
