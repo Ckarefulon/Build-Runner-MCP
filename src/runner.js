@@ -308,6 +308,10 @@ export async function runCommand(client, options) {
             localHead: workspace.localHead ?? null,
             aheadOfRemote: workspace.aheadOfRemote === true,
             patchBytes: workspace.patchBytes ?? 0,
+            // Null when the patch fit in the dispatch input; set when it had to
+            // travel via a branch in the engine repo.
+            patchRef: workspace.patchRef ?? null,
+            transport: workspace.transport ?? (workspace.patchInline ? 'inline' : null),
             note: workspace.note,
           },
         }
