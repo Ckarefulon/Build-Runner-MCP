@@ -111,6 +111,36 @@ export function createWorkspacePatch(dir, baseSha) {
   }
 }
 
+/**
+ * Publish a patch to a transient branch in the ENGINE repo.
+ *
+ * Why a branch rather than a dispatch input: `workflow_dispatch` inputs are
+ * capped at ~61 KiB (measured), and a real workspace patch is routinely larger.
+ * Why the ENGINE repo rather than the target: the whole point is to leave the
+ * caller's repository untouched.
+ *
+ * The branch is disposable — the workflow deletes it in a final step, and a
+ * stale one from a crashed run is overwritten on next use.
+ */
+export async function publishPatchToEngine(client, { owner, repo, branch, patch }) {
+  return await client.publishBlobFile(owner, repo, {
+    branch,
+    path: '.build-runner/workspace.patch',
+    content: patch,
+    message: `build-runner: workspace patch (${patch.length} bytes)`,
+  })
+}
+
+/** Remove the transient branch; best-effort, never fatal. */
+export async function deleteEngineBranch(client, { owner, repo, branch }) {
+  try {
+    await client.deleteRef(owner, repo, `heads/${branch}`)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Apply a patch to a checkout. Runs on the runner. */
 export function applyPatchScript() {
   return [
