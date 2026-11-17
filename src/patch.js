@@ -69,16 +69,27 @@ export function createWorkspacePatch(dir, baseSha) {
   // able to build without its staging area being rearranged.
   const indexDir = mkdtempSync(join(tmpdir(), 'br-patch-idx-'))
   const indexFile = join(indexDir, 'index')
-  // autocrlf=false matters on Windows: otherwise a LF file is re-encoded to CRLF
-  // and the patch would push CRLF bytes into a Linux build, silently changing
-  // the content it claims to preserve.
   const env = {
     GIT_INDEX_FILE: indexFile,
     GIT_CONFIG_NOSYSTEM: '1',
   }
 
   try {
-    git(dir, ['config', 'core.autocrlf', 'false'], { env })
+    // DO NOT override core.autocrlf here.
+    //
+    // An earlier revision forced `core.autocrlf=false` to keep line endings
+    // byte-exact. That was a serious bug: a Windows checkout stores LF in the
+    // object database but writes CRLF to the working tree. Disabling autocrlf
+    // makes `git add` compare raw bytes, so EVERY file looks modified — a
+    // 1949-file repository produced a 46 MB patch containing the entire tree
+    // instead of the handful of files the caller touched. That oversized upload
+    // then failed at the API with a proxy-shaped 502.
+    //
+    // Line endings are handled where they belong: the runner is Linux, where
+    // LF is native, and git's own conversion on checkout keeps the two sides
+    // consistent. Diffing therefore happens with the repository's configured
+    // settings, exactly as a normal `git diff` would.
+    //
     // Seed the temp index from HEAD, NOT from baseSha.
     //
     // `read-tree baseSha` followed by `add -A` produces "base -> working tree".
