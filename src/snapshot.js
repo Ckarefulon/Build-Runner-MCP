@@ -106,13 +106,22 @@ export async function prepareWorkspace(client, options) {
   }
 
   // Decide the transport: a small patch can ride in the dispatch input, but a
-  // realistic one exceeds the ~61 KiB limit, so it goes to a disposable branch
-  // in the ENGINE repo (never the target repo).
+  // realistic one exceeds the ~61 KiB limit, so it goes to a dedicated branch in
+  // the ENGINE repo (never the target repo).
   if (patch.length <= INLINE_PATCH_LIMIT || !engine) {
     return { ...result, patch, patchRef: null, patchInline: true }
   }
 
-  const branch = `br-patch/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  // One FIXED branch per target repository, overwritten every run.
+  //
+  // Deliberately not a unique-per-run name: a fresh branch each time means the
+  // engine repo accumulates refs forever and forces a cleanup step at the end of
+  // every job (an extra container step, ~10s, to delete something nobody looks
+  // at). Reusing one branch per target keeps concurrency safe — the workflow's
+  // concurrency group is keyed on repo+ref, so two builds of the same target can
+  // never race on it — while leaving no garbage behind.
+  const scope = `${target.owner}-${target.repo}`.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60)
+  const branch = `br-patch/${scope}`
   await publishPatchToEngine(client, {
     owner: engine.owner,
     repo: engine.repo,
