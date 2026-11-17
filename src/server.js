@@ -555,7 +555,19 @@ async function handle(message) {
         // A tool failure is a normal result with isError, not a protocol error:
         // the AI must see the message and be able to retry.
         return reply(id, {
-          content: [{ type: 'text', text: `build-runner 执行失败：${error.message}` }],
+          content: [
+            {
+              type: 'text',
+              // Include the stack: a bare message ("effectiveRef is not defined")
+              // says nothing about which call site broke, and this server runs as
+              // a child process where the caller cannot attach a debugger.
+              text:
+                `build-runner 执行失败：${error.message}` +
+                (error.stack
+                  ? `\n\n----- stack -----\n${String(error.stack).split('\n').slice(1, 12).join('\n')}`
+                  : ''),
+            },
+          ],
           isError: true,
         })
       }
