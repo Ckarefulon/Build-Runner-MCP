@@ -123,6 +123,7 @@ export async function releaseArtifacts(client, options) {
       dir: workspaceDir,
       repo: target.slug,
       baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
+      engine,
     })
   }
 
@@ -136,6 +137,7 @@ export async function releaseArtifacts(client, options) {
     command,
     artifact_paths: pathText,
     workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
+    patch_ref: workspace?.patchRef ?? '',
     package_name: packageName ?? '',
     release_tag: releaseTag ?? '',
     release_repo: releaseRepo ?? '',
