@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { parseSlug } from './github.js'
 import { parseJobLog, clip, summarizeFailure } from './logs.js'
 import { RUNNER_REPO_FALLBACK, normalizeShell, resolveTargets, verifyRef } from './runner.js'
-import { publishWorkspace, buildBranchName } from './snapshot.js'
+import { prepareWorkspace } from './snapshot.js'
 
 export const RELEASE_WORKFLOW_FILE = 'release.yml'
 
@@ -116,24 +116,14 @@ export async function releaseArtifacts(client, options) {
   // there — so a caller who had just fixed something got a package built from
   // older code, with no indication anything was wrong.
   let workspace = null
-  let effectiveRef = target.ref
   if (workspaceDir) {
-    workspace = await publishWorkspace(client, {
+    // Patch-based: no branch is created in the target repository. The runner
+    // checks out `target.ref` and applies the diff on top.
+    workspace = await prepareWorkspace(client, {
       dir: workspaceDir,
       repo: target.slug,
       baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
-      branch: workspaceBranch ?? buildBranchName(),
-      message: `build-runner: workspace snapshot for release ${new Date().toISOString()}`,
     })
-
-    if (workspace.published) {
-      effectiveRef = workspace.branch
-    } else if (workspace.sha !== workspace.baseSha) {
-      // Defensive: a non-published result that still moved means the snapshot
-      // was already current; build the branch so the caller gets what they asked
-      // for rather than an unrelated ref.
-      effectiveRef = workspace.branch
-    }
   }
 
   const tag = `brr-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
@@ -142,9 +132,10 @@ export async function releaseArtifacts(client, options) {
   const inputs = {
     tag,
     repo: target.slug,
-    ref: effectiveRef,
+    ref: target.ref,
     command,
     artifact_paths: pathText,
+    workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
     package_name: packageName ?? '',
     release_tag: releaseTag ?? '',
     release_repo: releaseRepo ?? '',
@@ -179,14 +170,13 @@ export async function releaseArtifacts(client, options) {
     ...(workspace
       ? {
           workspace: {
-            branch: workspace.branch,
+            mode: 'patch',
             changed: workspace.changed,
             summary: workspace.summary,
             baseSha: workspace.baseSha,
-            sha: workspace.sha,
             localHead: workspace.localHead ?? null,
             aheadOfRemote: workspace.aheadOfRemote === true,
-            published: workspace.published,
+            patchBytes: workspace.patchBytes ?? 0,
             note: workspace.note,
           },
         }
