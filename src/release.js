@@ -78,6 +78,8 @@ export async function releaseArtifacts(client, options) {
     draft = false,
     commitToRepo = true,
     commitBranch = 'builds',
+    // Variant suffix placed BEFORE the extension: "debug" -> app.debug.apk.
+    packageSuffix,
     shell = 'bash',
     runner = 'ubuntu-latest',
     setup = '',
@@ -99,6 +101,20 @@ export async function releaseArtifacts(client, options) {
   }
 
   const normalizedShell = normalizeShell(shell)
+
+  // Infer the variant suffix so a debug build is never mistaken for a release
+  // build. Explicit input always wins; otherwise a command that obviously
+  // builds debug (assembleDebug, Debug variant, --debug) gets `.debug`.
+  const inferredSuffix = (() => {
+    if (typeof packageSuffix === 'string' && packageSuffix.trim() !== '') {
+      return packageSuffix.trim().replace(/^\./, '')
+    }
+    if (packageSuffix === '') return ''
+    const haystack = `${command}\n${pathText}`.toLowerCase()
+    if (/assembledebug|bundledebug|\bdebug\b/.test(haystack)) return 'debug'
+    if (/assemblerelease|bundlerelease/.test(haystack)) return ''
+    return ''
+  })()
   const { target, runner: engine } = await resolveTargets(client, {
     repo,
     ref,
@@ -146,6 +162,7 @@ export async function releaseArtifacts(client, options) {
     command,
     artifact_paths: pathText,
     package_name: packageName ?? '',
+    package_suffix: inferredSuffix,
     release_tag: releaseTag ?? '',
     release_repo: releaseRepo ?? '',
     release_title: releaseTitle ?? '',
@@ -174,6 +191,7 @@ export async function releaseArtifacts(client, options) {
     shell: normalizedShell,
     runner,
     artifactPaths: pathText,
+    packageSuffix: inferredSuffix || null,
     commitBranch: commitToRepo === false ? null : (commitBranch ?? 'builds'),
     dispatchedAt: new Date(createdAt).toISOString(),
     ...(workspace
