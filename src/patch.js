@@ -123,21 +123,69 @@ export function createWorkspacePatch(dir, baseSha) {
 /**
  * Publish a patch to a transient branch in the ENGINE repo.
  *
+ * Two transports, because one of them can be blocked by a local proxy while the
+ * other works:
+ *
+ *   1. Git Data API — POST blob + tree + commit, then move the ref. Cheapest,
+ *      and the normal path.
+ *   2. Contents API — PUT the file directly on the branch. Different endpoint
+ *      and body shape, so a proxy that rejects `POST /git/blobs` specifically
+ *      (observed in the field: GET fine, POST blob 502 every time, while the
+ *      same request succeeds from a standalone script) will usually let this
+ *      through.
+ *
+ * Falling back costs one extra commit; failing costs the caller their build.
+ *
  * Why a branch rather than a dispatch input: `workflow_dispatch` inputs are
  * capped at ~61 KiB (measured), and a real workspace patch is routinely larger.
- * Why the ENGINE repo rather than the target: the whole point is to leave the
+ * Why the ENGINE repo rather than the target: the point is to leave the
  * caller's repository untouched.
- *
- * The branch is disposable — the workflow deletes it in a final step, and a
- * stale one from a crashed run is overwritten on next use.
  */
 export async function publishPatchToEngine(client, { owner, repo, branch, patch }) {
-  return await client.publishBlobFile(owner, repo, {
-    branch,
-    path: '.build-runner/workspace.patch',
-    content: patch,
-    message: `build-runner: workspace patch (${patch.length} bytes)`,
-  })
+  const path = '.build-runner/workspace.patch'
+  const message = `build-runner: workspace patch (${patch.length} bytes)`
+
+  const attempts = []
+
+  // Transport 1: Git Data API.
+  try {
+    const result = await client.publishBlobFile(owner, repo, {
+      branch,
+      path,
+      content: patch,
+      message,
+    })
+    return { ...result, transport: 'git-data' }
+  } catch (error) {
+    attempts.push(`git-data: ${error.message.split('\n')[0].slice(0, 120)}`)
+  }
+
+  // Transport 2: Contents API. Base64 is stored as the file body, so the runner
+  // decodes it before applying — see the workflow's Fetch workspace patch step.
+  try {
+    const base = await client.resolveCommit(owner, repo, 'main')
+    // `putFile` needs the branch to exist; create or reset it first.
+    await client.upsertRef(owner, repo, branch, base.sha, { force: true })
+    const encoded = patch.toString('base64')
+    const res = await client.putFile(owner, repo, path, {
+      text: encoded,
+      message,
+      branch,
+    })
+    return {
+      branch,
+      sha: res.commit?.sha ?? null,
+      transport: 'contents',
+      encoded: true,
+    }
+  } catch (error) {
+    attempts.push(`contents: ${error.message.split('\n')[0].slice(0, 120)}`)
+  }
+
+  throw new PatchError(
+    `两种传输方式都失败了：\n  ${attempts.join('\n  ')}\n` +
+      '如果两者都是代理返回的 502，说明本机网关在拦截写请求；可尝试直连或换网络。'
+  )
 }
 
 /** Remove the transient branch; best-effort, never fatal. */
