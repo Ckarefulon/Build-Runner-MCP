@@ -27,7 +27,14 @@
  */
 
 import { createWorkspacePatch, publishPatchToEngine } from './patch.js'
-import { collectChanges, parseRemote, summarizeChanges, isGitRepo, repoInfo } from './workspace.js'
+import {
+  collectChanges,
+  parseRemote,
+  summarizeChanges,
+  isGitRepo,
+  repoInfo,
+  trackedFileCount,
+} from './workspace.js'
 import { parseSlug } from './github.js'
 
 // Inline dispatch inputs are capped near 61 KiB (measured), so anything larger
@@ -75,6 +82,30 @@ export async function prepareWorkspace(client, options) {
 
   const { patch, files } = createWorkspacePatch(dir, baseCommit.sha)
   const changed = files.length
+
+  // Refuse an implausibly large patch BEFORE uploading it.
+  //
+  // A patch that touches nearly every tracked file is never a real edit — it is
+  // a bug (line-ending churn, a wrong base, a submodule confusion). Uploading it
+  // wastes tens of MB and, past a few MB, the request fails at the network layer
+  // with an error that looks like a proxy problem, sending the caller down the
+  // wrong path entirely. Failing here names the actual condition.
+  const MAX_PATCH_BYTES = 8 * 1024 * 1024
+  if (patch.length > MAX_PATCH_BYTES) {
+    // How much of the tree is involved: this distinguishes "one huge binary" from
+    // "the whole repository shows as modified".
+    const ratio = trackedFileCount(dir) > 0 ? changed / trackedFileCount(dir) : 0
+    const explanation =
+      ratio > 0.8
+        ? `几乎整个仓库都被算成改动（${changed}/${trackedFileCount(dir)} 个文件）。\n` +
+          '这通常意味着行尾（CRLF/LF）或基准分支不一致，而不是真的改了这么多。\n' +
+          '检查本地的 core.autocrlf 设置，以及 ref 是否指向正确的分支。'
+        : `改动涉及 ${changed} 个文件，合计 ${(patch.length / 1048576).toFixed(1)} MiB。`
+    throw new Error(
+      `补丁过大：${(patch.length / 1048576).toFixed(1)} MiB（上限 ${MAX_PATCH_BYTES / 1048576} MiB）。\n` +
+        explanation
+    )
+  }
 
   // Summarise from the file list so the caller sees the same shape as before.
   const summary = summarizeChanges(
