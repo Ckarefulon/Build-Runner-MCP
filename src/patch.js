@@ -69,27 +69,33 @@ export function createWorkspacePatch(dir, baseSha) {
   // able to build without its staging area being rearranged.
   const indexDir = mkdtempSync(join(tmpdir(), 'br-patch-idx-'))
   const indexFile = join(indexDir, 'index')
+
+  // Force ONE normalisation for every git call that touches the index.
+  //
+  // Do not rely on the caller's `core.autocrlf`. Repositories configure it
+  // themselves — this one has `false` set in .git/config while the working tree
+  // is CRLF and the object database is LF. With conversion disabled, `git add`
+  // compares raw bytes, so every text file looks modified: a 1949-file repo
+  // produced a 46 MB patch, and the oversized upload then failed as a
+  // proxy-shaped 502 that pointed away from the real cause.
+  //
+  // `input` is the portable choice: it converts CRLF→LF on the way in and
+  // performs no conversion on the way out, so the index matches the object
+  // database regardless of how the checkout was written to disk.
+  //
+  // `-c` is used (not `git config`) so nothing is written to the repository, and
+  // it is applied to read-tree / add / diff alike: mixing settings across those
+  // three is what makes the comparison inconsistent.
+  const AUTOCRLF = ['-c', 'core.autocrlf=input', '-c', 'core.eol=lf']
   const env = {
     GIT_INDEX_FILE: indexFile,
     GIT_CONFIG_NOSYSTEM: '1',
+    // Suppress the "CRLF will be replaced by LF" warning storm: the conversion
+    // is intentional and the noise buries real output.
+    GIT_ADVICE: '0',
   }
 
   try {
-    // DO NOT override core.autocrlf here.
-    //
-    // An earlier revision forced `core.autocrlf=false` to keep line endings
-    // byte-exact. That was a serious bug: a Windows checkout stores LF in the
-    // object database but writes CRLF to the working tree. Disabling autocrlf
-    // makes `git add` compare raw bytes, so EVERY file looks modified — a
-    // 1949-file repository produced a 46 MB patch containing the entire tree
-    // instead of the handful of files the caller touched. That oversized upload
-    // then failed at the API with a proxy-shaped 502.
-    //
-    // Line endings are handled where they belong: the runner is Linux, where
-    // LF is native, and git's own conversion on checkout keeps the two sides
-    // consistent. Diffing therefore happens with the repository's configured
-    // settings, exactly as a normal `git diff` would.
-    //
     // Seed the temp index from HEAD, NOT from baseSha.
     //
     // `read-tree baseSha` followed by `add -A` produces "base -> working tree".
@@ -101,15 +107,19 @@ export function createWorkspacePatch(dir, baseSha) {
     // Seeding from HEAD makes the index describe the local tree as committed
     // (plus any unstaged edits), and the diff against baseSha then includes
     // unpushed commits AND working changes.
-    git(dir, ['read-tree', 'HEAD'], { env })
-    git(dir, ['add', '-A'], { env })
-    const patch = git(dir, ['diff', '--binary', '--cached', baseSha], {
+    git(dir, [...AUTOCRLF, 'read-tree', 'HEAD'], { env })
+    git(dir, [...AUTOCRLF, 'add', '-A'], { env })
+    const patch = git(dir, [...AUTOCRLF, 'diff', '--binary', '--cached', baseSha], {
       env,
       buffer: true,
     })
 
     // Report what the patch contains so the caller can confirm intent.
-    const nameStatus = git(dir, ['diff', '--cached', '--name-status', baseSha], { env })
+    // Same normalisation as the patch itself, or the file list would disagree
+    // with the diff it describes.
+    const nameStatus = git(dir, [...AUTOCRLF, 'diff', '--cached', '--name-status', baseSha], {
+      env,
+    })
     const files = nameStatus
       .split('\n')
       .map(line => line.trim())
