@@ -79,6 +79,39 @@ test('editing one file out of many yields a patch for one file only', () => {
   }
 })
 
+test('a repository that configures autocrlf=false does not poison the patch', () => {
+  // The field bug: the repository itself sets `core.autocrlf false`, the working
+  // tree is CRLF, and the object database is LF. With conversion off, `git add`
+  // compares raw bytes and every text file looks modified. Patch generation must
+  // pin its own normalisation instead of inheriting the caller's setting.
+  const { dir, git } = repo()
+  try {
+    // A CRLF file committed as LF is what a Windows checkout produces.
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    for (let i = 0; i < 40; i += 1) {
+      writeFileSync(join(dir, 'src', `f${i}.txt`), `content ${i}\n`)
+    }
+    git(['add', '-A'])
+    git(['commit', '-qm', 'base'])
+    const base = git(['rev-parse', 'HEAD']).trim()
+
+    // Hostile setup: repo-level autocrlf=false.
+    git(['config', '--local', 'core.autocrlf', 'false'])
+
+    writeFileSync(join(dir, 'src', 'f3.txt'), 'edited\n')
+
+    const { patch, files } = createWorkspacePatch(dir, base)
+    assert.equal(files.length, 1, `expected 1 changed file, got ${files.length}`)
+    assert.equal(files[0].path, 'src/f3.txt')
+    assert.ok(patch.length < 2000, `patch too large: ${patch.length} bytes`)
+
+    // And the caller's setting must survive untouched.
+    assert.equal(git(['config', '--get', 'core.autocrlf']).trim(), 'false')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('patch generation leaves the caller git config untouched', () => {
   // The fix must not silently rewrite the caller's git config either — the
   // invariant is "unchanged", not "unset": a machine may legitimately have
