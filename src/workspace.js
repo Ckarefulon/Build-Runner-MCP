@@ -174,6 +174,21 @@ export function collectChanges(dir) {
   return { changes, head, toplevel, branch }
 }
 
+/** Number of files git tracks, used to judge whether a diff is suspicious. */
+export function trackedFileCount(dir) {
+  try {
+    const out = execFileSync('git', ['ls-files'], {
+      cwd: dir,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return out.split('\n').filter(line => line.trim() !== '').length
+  } catch {
+    return 0
+  }
+}
+
 /** Whether the local repo contains a given commit (needed before diffing it). */
 export function hasCommit(dir, sha) {
   try {
