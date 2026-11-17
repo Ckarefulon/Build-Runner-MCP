@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import { createClient, GitHubError, parseSlug } from './github.js'
 import { parseJobLog, clip, summarizeFailure } from './logs.js'
-import { publishWorkspace, buildBranchName } from './snapshot.js'
+import { prepareWorkspace } from './snapshot.js'
 
 export const RUNNER_REPO_FALLBACK = 'Ckarefulon/Build-Runner'
 export const WORKFLOW_FILE = 'run.yml'
@@ -155,33 +155,25 @@ export async function runCommand(client, options) {
   })
 
   let workspace = null
-  let effectiveRef = target.ref
 
+  // Snapshot mode: send a PATCH of the local changes instead of publishing a
+  // branch. The target repository is never written to — the runner checks out
+  // the caller's own branch and applies the diff.
+  if (verifyBranch && target.ref !== 'HEAD') {
+    await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
+  }
   if (workspaceDir) {
-    // Publish the local tree onto a permanent branch of the TARGET repo. Git
-    // objects are per-repository, so `base_tree` can only reference a tree that
-    // already lives where the new commit goes — a dedicated branch in the
-    // target repository is the only place that works.
-    if (verifyBranch && target.ref !== 'HEAD') {
-      await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
-    }
-    workspace = await publishWorkspace(context, {
+    workspace = await prepareWorkspace(context, {
       dir: workspaceDir,
       repo: target.slug,
       baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
-      branch: workspaceBranch ?? buildBranchName(),
-      message: `build-runner: workspace snapshot for ${new Date().toISOString()}`,
     })
-    effectiveRef = workspace.ref
-  } else if (verifyBranch && target.ref !== 'HEAD') {
-    await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
   }
 
-  // In snapshot mode the run must check out the BRANCH, never the raw SHA:
-  // actions/checkout given a SHA fetches that single commit even at
-  // fetch-depth 0, so `git describe`/`rev-list --count` inside the build would
-  // see orphaned history — the exact discrepancy this mode exists to avoid.
-  const checkoutRef = workspace ? workspace.branch : effectiveRef
+  // Always check out the caller's own ref. The patch is applied on top, so
+  // history stays real (`git describe`, `rev-list --count`) and no synthetic
+  // commit is needed.
+  const checkoutRef = target.ref
 
   const tag = `br-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   const createdAt = Date.now()
@@ -194,14 +186,13 @@ export async function runCommand(client, options) {
     runner,
     timeout_minutes: String(timeoutMinutes),
     setup,
-    // A workspace snapshot must keep REAL history: `git describe`,
-    // `git rev-list --count` and version codes derived from commit counts all
-    // read it, and a shallow clone silently answers "1". Snapshot mode therefore
-    // defaults to the full history (0 = unlimited) unless the caller overrides.
-    // A plain head build stays shallow to keep dispatch fast.
+    // A workspace build needs REAL history: `git describe`, `git rev-list
+    // --count` and version codes derived from commit counts all read it, and a
+    // shallow clone silently answers "1".
     fetch_depth: String(
       fetchDepth !== undefined ? fetchDepth : workspace ? 0 : 1
     ),
+    workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
     cache,
     artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
   }
@@ -223,13 +214,14 @@ export async function runCommand(client, options) {
     ...(workspace
       ? {
           workspace: {
-            mode: workspaceMode,
-            branch: workspace.branch,
+            mode: 'patch',
             changed: workspace.changed,
             summary: workspace.summary,
             baseSha: workspace.baseSha,
-            sha: workspace.sha,
-            uploadedBytes: workspace.uploadedBytes ?? 0,
+            localHead: workspace.localHead ?? null,
+            aheadOfRemote: workspace.aheadOfRemote === true,
+            patchBytes: workspace.patchBytes ?? 0,
+            note: workspace.note,
           },
         }
       : {}),
