@@ -140,6 +140,9 @@ export async function runCommand(client, options) {
     workspaceDir,
     workspaceMode = 'head',
     workspaceBranch,
+    // Optional release in the same run: { artifactPaths?, packageName?,
+    // releaseTag?, releaseTitle?, releaseNotes?, draft? }
+    release,
   } = options
 
   if (typeof command !== 'string' || command.trim() === '') {
@@ -197,6 +200,16 @@ export async function runCommand(client, options) {
     ),
     workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
     patch_ref: workspace?.patchRef ?? '',
+    // Optional release in the SAME job. Building twice (once to test, once to
+    // package) doubles the wall clock for no benefit, and it also risks shipping
+    // a different artifact than the one that was tested.
+    publish_release: release ? 'true' : 'false',
+    release_artifact_paths: release?.artifactPaths ?? '',
+    package_name: release?.packageName ?? '',
+    release_tag: release?.releaseTag ?? '',
+    release_title: release?.releaseTitle ?? '',
+    release_notes: release?.releaseNotes ?? '',
+    release_draft: release?.draft ? 'true' : 'false',
     cache,
     artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
   }
@@ -215,6 +228,7 @@ export async function runCommand(client, options) {
     command,
     dispatchedAt: new Date(createdAt).toISOString(),
     workflow: `https://github.com/${engine.slug}/actions/workflows/${WORKFLOW_FILE}`,
+    ...(release ? { release: true } : {}),
     ...(workspace
       ? {
           workspace: {
@@ -370,6 +384,24 @@ export async function collectResult(client, engine, run, options = {}) {
     outputLines: parsed.lines ?? 0,
     failureHints: succeeded ? null : summarizeFailure(parsed.output),
     artifacts,
+    // Present only when the run also published a release.
+    ...(parsed.report.release_url
+      ? {
+          release: {
+            tag: parsed.report.release_tag || null,
+            url: parsed.report.release_url,
+          },
+        }
+      : {}),
+    ...(parsed.report.package_name
+      ? {
+          package: {
+            name: parsed.report.package_name,
+            bytes: Number(parsed.report.package_bytes ?? 0) || null,
+            sha256: parsed.report.package_sha256 || null,
+          },
+        }
+      : {}),
     // Outranks a plain head build: the caller must know the run used a snapshot
     // of uncommitted local changes, not a pushed commit.
     mode: receipt.workspace ? 'snapshot' : 'head',
