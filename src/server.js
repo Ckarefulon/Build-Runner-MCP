@@ -480,9 +480,18 @@ function render(value) {
     lines.push(`仓库 ${value.repo ?? '?'} @ ${value.ref ?? '?'}${value.revision ? ` (${value.revision})` : ''}`)
     if (value.mode === 'snapshot' && value.workspace) {
       const ws = value.workspace
+      // There is no branch any more: changes travel as a patch. Say which
+      // transport carried it, since a fallback means the primary path failed.
+      const how =
+        ws.transport === 'contents'
+          ? '，已用 contents 通道传输'
+          : ws.patchRef
+            ? '，已传到引擎仓库补丁分支'
+            : ''
       lines.push(
-        `⚠️ 快照模式：包含 ${ws.changed} 处未提交改动（基准 ${String(ws.baseSha).slice(0, 7)}，` +
-          `已传到分支 ${ws.branch}）。这是预检结果，不等同于已推送代码的构建。`
+        `⚠️ 快照模式：包含 ${ws.changed} 处改动（基准 ${String(ws.baseSha).slice(0, 7)}` +
+          `${ws.aheadOfRemote ? '，含未推送提交' : ''}${how}）。` +
+          '这是预检结果，不等同于已推送代码的构建。'
       )
     }
     if (value.runUrl) lines.push(`运行 ${value.runUrl}`)
