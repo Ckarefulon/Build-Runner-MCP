@@ -167,6 +167,9 @@ export async function runCommand(client, options) {
       dir: workspaceDir,
       repo: target.slug,
       baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
+      // Patches too large for a dispatch input are parked on a disposable branch
+      // in the ENGINE repo — never the target.
+      engine,
     })
   }
 
@@ -193,6 +196,7 @@ export async function runCommand(client, options) {
       fetchDepth !== undefined ? fetchDepth : workspace ? 0 : 1
     ),
     workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
+    patch_ref: workspace?.patchRef ?? '',
     cache,
     artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
   }
