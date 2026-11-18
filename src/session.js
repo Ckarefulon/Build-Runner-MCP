@@ -163,7 +163,11 @@ export async function startSession(client, options) {
 /** Run one command in the session and return its result. */
 export async function runInSession(client, options) {
   const { session, issueNumber, engine, command, timeoutMs } = options
-  const commandId = await sendCommand(client, { engine, issueNumber, command, id: session })
+  // Each command needs its OWN id. Reusing the session id made the second read
+  // return the first command's result, because ids are what correlate a command
+  // with its reply.
+  const commandId = `${session}-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
+  await sendCommand(client, { engine, issueNumber, command, id: commandId })
   const result = await waitForResult(client, { engine, issueNumber, commandId, timeoutMs })
   if (!result) {
     return {
