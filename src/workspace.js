@@ -30,17 +30,78 @@ export class GitError extends Error {
   }
 }
 
-export function isGitRepo(dir) {
+/**
+ * Check that a directory is a git working tree, returning WHY when it is not.
+ *
+ * The previous boolean version swallowed every failure, so three very different
+ * situations were indistinguishable to the caller:
+ *   - the directory does not exist / was cleaned up,
+ *   - git could not be spawned (PATH, permissions, sandbox),
+ *   - the directory is simply not a repository.
+ *
+ * All three surfaced as "快照模式要求本地目录是 git 工作区", which sends the caller
+ * looking at their path when the real cause was something else entirely.
+ *
+ * @returns {{ok:true} | {ok:false, reason:string, detail:string}}
+ */
+export function inspectGitRepo(dir) {
+  if (typeof dir !== 'string' || dir.trim() === '') {
+    return { ok: false, reason: 'missing-path', detail: 'workspaceDir 为空' }
+  }
+  let stat = null
   try {
-    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+    stat = statSync(dir)
+  } catch (error) {
+    const code = error?.code ?? ''
+    if (code === 'ENOENT') {
+      return { ok: false, reason: 'not-found', detail: `目录不存在：${dir}` }
+    }
+    return {
+      ok: false,
+      reason: 'unreadable',
+      detail: `无法访问 ${dir}：${code || error.message}`,
+    }
+  }
+  if (!stat.isDirectory()) {
+    return { ok: false, reason: 'not-a-directory', detail: `不是目录：${dir}` }
+  }
+
+  try {
+    const out = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
       cwd: dir,
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
-    return true
-  } catch {
-    return false
+    if (out.trim() !== 'true') {
+      return {
+        ok: false,
+        reason: 'bare-or-nested',
+        detail: `${dir} 在 git 仓库内但不是工作树根（可能是 .git 目录或裸仓库内部）`,
+      }
+    }
+    return { ok: true }
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      // git itself never ran: PATH, permission, or sandbox.
+      return {
+        ok: false,
+        reason: 'git-unavailable',
+        detail:
+          `无法启动 git（cwd=${dir}）。` +
+          '通常是 git 不在 PATH，或该进程没有访问此目录的权限。',
+      }
+    }
+    const stderr = String(error?.stderr ?? '').trim()
+    return {
+      ok: false,
+      reason: 'not-a-repo',
+      detail: `${dir} 不是 git 工作区${stderr ? `：${stderr.split('\n')[0]}` : ''}`,
+    }
   }
+}
+
+export function isGitRepo(dir) {
+  return inspectGitRepo(dir).ok
 }
 
 function git(dir, args, { buffer = false } = {}) {
