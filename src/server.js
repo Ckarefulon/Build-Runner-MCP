@@ -365,7 +365,11 @@ async function invoke(toolName, args = {}) {
     case 'session_start': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
       const engineSlug = process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK
-      const engine = parseSlug(engineSlug)
+      // `parseSlug` returns owner/repo only; the dispatch still needs a ref.
+      const engine = {
+        ...parseSlug(engineSlug),
+        ref: process.env.BUILD_RUNNER_REF ?? 'main',
+      }
       const shell = args.shell ?? 'bash'
       const timeoutMinutes = Math.min(Number(args.timeoutMinutes) || 120, 360)
 
