@@ -15,10 +15,11 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { runCommand, getRunStatus, cancelRun, diagnose } from './runner.js'
-import { createClient } from './github.js'
-import { publishWorkspace, inspectBuildBranch, resetBuildBranch } from './snapshot.js'
+import { runCommand, getRunStatus, cancelRun, diagnose, RUNNER_REPO_FALLBACK } from './runner.js'
+import { createClient, parseSlug } from './github.js'
+import { publishWorkspace, inspectBuildBranch, resetBuildBranch, prepareWorkspace } from './snapshot.js'
 import { releaseArtifacts } from './release.js'
+import { startSession, runInSession, readResults } from './session.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
@@ -244,6 +245,66 @@ const TOOLS = [
     },
   },
   {
+    name: 'session_start',
+    description:
+      '开启一个**常驻云端环境**，之后可以反复在同一个环境里执行命令（session_run），' +
+      '环境（Gradle daemon、增量编译状态、工作区文件）在会话期间一直保留。' +
+      '实测本项目：同一个环境里第一次编译约 290 秒，之后再次编译约 1-2 秒。' +
+      '会话上限受 GitHub 单个 job 限制（最多 6 小时），job 结束后环境销毁。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '目标仓库 owner/name' },
+        ref: { type: 'string', description: '分支/标签/SHA，默认仓库默认分支' },
+        shell: { type: 'string', enum: ['bash', 'pwsh', 'python'], description: '解释器，默认 bash' },
+        setup: { type: 'string', description: '会话开始前执行一次的安装/准备命令' },
+        runner: { type: 'string', description: 'runner 标签，默认 ubuntu-latest' },
+        timeoutMinutes: {
+          type: 'number',
+          description: '会话最长存活分钟数，默认 120。GitHub 硬上限 360（6 小时）。',
+        },
+        idleSeconds: {
+          type: 'number',
+          description: '空闲多久后自动结束会话，默认 900 秒。',
+        },
+        workspaceDir: {
+          type: 'string',
+          description: '本地 git 工作区。提供后会把未提交改动和未推送提交作为补丁带进会话。',
+        },
+      },
+      required: ['repo'],
+    },
+  },
+  {
+    name: 'session_run',
+    description:
+      '在**已有的常驻会话**里执行一条命令，并等待结果返回。' +
+      '这是「多次命令复用同一环境」的正确用法：每次可以看完输出再决定下一条。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'session_start 返回的 session id' },
+        issueNumber: { type: 'number', description: 'session_start 返回的 issueNumber' },
+        command: { type: 'string', description: '要执行的命令（可多行）' },
+        timeoutMs: { type: 'number', description: '等待结果的毫秒数，默认 30 分钟' },
+      },
+      required: ['session', 'issueNumber', 'command'],
+    },
+  },
+  {
+    name: 'session_status',
+    description: '查看常驻会话的状态：还能活多久、执行过哪些命令、最近的结果。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'session id' },
+        issueNumber: { type: 'number', description: '会话对应的 issue 号' },
+        maxOutputChars: { type: 'number', description: '返回输出截断长度' },
+      },
+      required: ['session', 'issueNumber'],
+    },
+  },
+  {
     name: 'status',
     description: '查询某次云端运行的当前状态；已完成则直接返回完整输出和退出码。',
     inputSchema: {
@@ -300,6 +361,71 @@ async function invoke(toolName, args = {}) {
         workspaceBranch: args.workspaceBranch,
         release: args.release,
       })
+    }
+    case 'session_start': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engineSlug = process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK
+      const engine = parseSlug(engineSlug)
+      const shell = args.shell ?? 'bash'
+      const timeoutMinutes = Math.min(Number(args.timeoutMinutes) || 120, 360)
+
+      // A workspaceDir travels as a patch, exactly like `run`, so a session can
+      // be started on uncommitted local work.
+      let patchInline = ''
+      let patchRef = ''
+      if (args.workspaceDir) {
+        const prepared = await prepareWorkspace(client, {
+          dir: args.workspaceDir,
+          repo: args.repo,
+          baseRef: args.ref ?? 'HEAD',
+          engine,
+        })
+        patchInline = prepared.patch ? prepared.patch.toString('base64') : ''
+        patchRef = prepared.patchRef ?? ''
+      }
+
+      return await startSession(client, {
+        repo: args.repo,
+        ref: args.ref,
+        engine,
+        shell,
+        setup: args.setup ?? '',
+        runner: args.runner ?? 'ubuntu-latest',
+        timeoutMinutes,
+        idleSeconds: args.idleSeconds,
+        workspacePatch: patchInline,
+        patchRef,
+      })
+    }
+    case 'session_run': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engine = parseSlug(process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK)
+      return await runInSession(client, {
+        session: args.session,
+        issueNumber: args.issueNumber,
+        engine,
+        command: args.command,
+        timeoutMs: args.timeoutMs,
+      })
+    }
+    case 'session_status': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engine = parseSlug(process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK)
+      const results = await readResults(client, { engine, issueNumber: args.issueNumber })
+      const items = [...results.values()]
+      return {
+        session: args.session,
+        issueNumber: args.issueNumber,
+        issueUrl: `https://github.com/${engine.owner}/${engine.repo}/issues/${args.issueNumber}`,
+        commandCount: items.length,
+        lastResults: items.slice(-5).map(item => ({
+          id: item.id,
+          exitCode: item.exitCode,
+          durationSeconds: item.durationSeconds,
+          outputPreview: String(item.output ?? '').slice(-1500),
+        })),
+        note: '会话上限受 GitHub 单个 job 限制（最多 6 小时）；job 结束后环境销毁。',
+      }
     }
     case 'prepare_workspace': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
