@@ -231,16 +231,26 @@ export async function runCommand(client, options) {
     }
   }
   if (workspaceDir) {
-    workspace = await prepareWorkspace(context, {
-      dir: workspaceDir,
-      repo: target.slug,
-      // The patch must be built against the SAME base the run will check out,
-      // otherwise the diff describes a tree the runner never has.
-      baseRef: checkoutRef === 'HEAD' ? (workspaceBaseFromLocal(workspaceDir) ?? 'HEAD') : checkoutRef,
-      // Patches too large for a dispatch input are parked on a disposable branch
-      // in the ENGINE repo — never the target.
-      engine,
-    })
+    try {
+      workspace = await prepareWorkspace(context, {
+        dir: workspaceDir,
+        repo: target.slug,
+        // The patch must be built against the SAME base the run will check out,
+        // otherwise the diff describes a tree the runner never has.
+        baseRef:
+          checkoutRef === 'HEAD' ? (workspaceBaseFromLocal(workspaceDir) ?? 'HEAD') : checkoutRef,
+        // Patches too large for a dispatch input are parked on a disposable branch
+        // in the ENGINE repo — never the target.
+        engine,
+      })
+    } catch (error) {
+      // Name the step. A bare stack from prepareWorkspace tells the caller
+      // nothing about which stage failed or what to change.
+      throw new Error(
+        `准备本地改动失败（快照模式，workspaceDir=${workspaceDir}）：\n${error.message}`,
+        { cause: error }
+      )
+    }
   }
 
   // Always check out the caller's own ref. The patch is applied on top, so
