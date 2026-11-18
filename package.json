@@ -23,7 +23,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/logs.test.js test/workspace.test.js test/ahead.test.js test/release.test.js test/ref.test.js test/patch.test.js test/retry.test.js test/transport.test.js test/markers.test.js test/crlf.test.js",
+    "test": "node --test test/logs.test.js test/workspace.test.js test/ahead.test.js test/release.test.js test/ref.test.js test/patch.test.js test/retry.test.js test/transport.test.js test/markers.test.js test/crlf.test.js test/gitcheck.test.js",
     "smoke": "node tools/mcp-client.mjs list"
   },
   "keywords": [
