@@ -119,12 +119,19 @@ export async function releaseArtifacts(client, options) {
   if (workspaceDir) {
     // Patch-based: no branch is created in the target repository. The runner
     // checks out `target.ref` and applies the diff on top.
-    workspace = await prepareWorkspace(client, {
-      dir: workspaceDir,
-      repo: target.slug,
-      baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
-      engine,
-    })
+    try {
+      workspace = await prepareWorkspace(client, {
+        dir: workspaceDir,
+        repo: target.slug,
+        baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
+        engine,
+      })
+    } catch (error) {
+      throw new Error(
+        `出包前准备本地改动失败（workspaceDir=${workspaceDir}）：\n${error.message}`,
+        { cause: error }
+      )
+    }
   }
 
   const tag = `brr-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
