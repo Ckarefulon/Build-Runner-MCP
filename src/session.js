@@ -107,15 +107,21 @@ export async function startSession(client, options) {
   const {
     repo,
     ref,
-    engine,
     shell = 'bash',
     setup = '',
     runner = 'ubuntu-latest',
     timeoutMinutes = 120,
+    idleSeconds = 900,
     fetchDepth = 0,
     workspacePatch = '',
     patchRef = '',
   } = options
+
+  // The engine needs a ref for the dispatch; `parseSlug` does not provide one.
+  const engine = {
+    ...options.engine,
+    ref: options.engine?.ref ?? process.env.BUILD_RUNNER_REF ?? 'main',
+  }
 
   const session = `s-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
   const issue = await openSessionIssue(client, {
