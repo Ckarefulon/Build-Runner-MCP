@@ -32,6 +32,7 @@ import {
   parseRemote,
   summarizeChanges,
   isGitRepo,
+  inspectGitRepo,
   repoInfo,
   trackedFileCount,
 } from './workspace.js'
@@ -60,7 +61,23 @@ export async function prepareWorkspace(client, options) {
 
   const target = parseSlug(repo)
   if (!target) throw new Error(`无法解析目标仓库：${repo}`)
-  if (!isGitRepo(dir)) throw new Error(`快照模式要求本地目录是 git 工作区：${dir}`)
+
+  // Report the SPECIFIC reason a workspace cannot be used. The old blanket
+  // message ("must be a git working tree") was wrong for a missing directory, a
+  // permission problem, or git not being spawnable — all of which look like a
+  // bad path and send the caller debugging the wrong thing.
+  const check = inspectGitRepo(dir)
+  if (!check.ok) {
+    const hint =
+      check.reason === 'not-found'
+        ? '\n（这个目录已经不存在了：临时目录会被系统清理，请确认路径仍然有效）'
+        : check.reason === 'git-unavailable'
+          ? '\n（git 无法启动，不是仓库本身的问题）'
+          : ''
+    throw new Error(
+      `快照模式无法使用该目录（${check.reason}）：\n${check.detail}${hint}`
+    )
+  }
 
   const info = repoInfo(dir)
   const remoteSlug = parseRemote(info.remote)
