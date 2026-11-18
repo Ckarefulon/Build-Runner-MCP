@@ -56,7 +56,18 @@ const TOOLS = [
         command: {
           type: 'string',
           description:
-            '要执行的命令，可多行。例如 "pnpm install && pnpm build" 或 "gradle assembleDebug"。',
+            '要执行的命令，可多行。例如 "pnpm install && pnpm build" 或 "gradle assembleDebug"。' +
+            '需要跑多条独立命令时优先用 commands —— 那样它们共享同一个热构建环境。',
+        },
+        commands: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '要顺序执行的命令列表，全部在**同一个 job** 内完成。' +
+            '这比多次调用 run 快得多：Gradle 的守护进程和增量状态会被复用。' +
+            '实测本项目冷编译约 231 秒，同一 job 内第二次编译仅约 1 秒。' +
+            '每条命令的输出单独标注，前面失败会继续跑后面的（便于一次看到所有问题），' +
+            '最终只要有失败就整体判失败。空行和以 # 开头的行会被忽略。',
         },
         shell: {
           type: 'string',
@@ -125,7 +136,7 @@ const TOOLS = [
           },
         },
       },
-      required: ['repo', 'command'],
+      required: ['repo'],
     },
   },
   {
@@ -274,6 +285,7 @@ async function invoke(toolName, args = {}) {
         repo: args.repo,
         ref: args.ref,
         command: args.command,
+        commands: args.commands,
         shell: args.shell,
         runner: args.runner,
         setup: args.setup,
