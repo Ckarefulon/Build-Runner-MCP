@@ -19,7 +19,7 @@ import { runCommand, getRunStatus, cancelRun, diagnose, RUNNER_REPO_FALLBACK } f
 import { createClient, parseSlug } from './github.js'
 import { publishWorkspace, inspectBuildBranch, resetBuildBranch, prepareWorkspace } from './snapshot.js'
 import { releaseArtifacts } from './release.js'
-import { startSession, runInSession, readResults } from './session.js'
+import { startSession, runInSession, screenshotInSession, readResults } from './session.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
@@ -267,6 +267,18 @@ const TOOLS = [
           type: 'number',
           description: '空闲多久后自动结束会话，默认 900 秒。',
         },
+        emulator: {
+          type: 'object',
+          description:
+            '在本会话里启动一台 Android 模拟器，之后就能 adb install / am start / logcat / 截图。' +
+            '实测启动约 80 秒（安装镜像 37s + 开机 39s）。不传则不启模拟器。',
+          properties: {
+            api: { type: 'number', description: 'Android API 级别，默认 34' },
+            arch: { type: 'string', description: '架构，默认 x86_64' },
+            profile: { type: 'string', description: '设备型号，默认 pixel_7' },
+            image: { type: 'string', description: '镜像类型，默认 google_apis' },
+          },
+        },
         workspaceDir: {
           type: 'string',
           description: '本地 git 工作区。提供后会把未提交改动和未推送提交作为补丁带进会话。',
@@ -289,6 +301,22 @@ const TOOLS = [
         timeoutMs: { type: 'number', description: '等待结果的毫秒数，默认 30 分钟' },
       },
       required: ['session', 'issueNumber', 'command'],
+    },
+  },
+  {
+    name: 'session_screenshot',
+    description:
+      '截取会话中模拟器的当前画面，**直接把 PNG 返回给你看**。' +
+      '配合 session_start 的 emulator 参数使用：可以 adb install 后启动 App，再截图确认界面是否正确。' +
+      '这是唯一能让 AI 自己看到「装上去以后长什么样」的手段。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'session_start 返回的 session id' },
+        issueNumber: { type: 'number', description: '会话对应的 issue 号' },
+        timeoutMs: { type: 'number', description: '等待截图的毫秒数，默认 60 秒' },
+      },
+      required: ['session', 'issueNumber'],
     },
   },
   {
@@ -397,6 +425,7 @@ async function invoke(toolName, args = {}) {
         runner: args.runner ?? 'ubuntu-latest',
         timeoutMinutes,
         idleSeconds: args.idleSeconds,
+        emulator: args.emulator,
         workspacePatch: patchInline,
         patchRef,
       })
@@ -411,6 +440,30 @@ async function invoke(toolName, args = {}) {
         command: args.command,
         timeoutMs: args.timeoutMs,
       })
+    }
+    case 'session_screenshot': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engine = {
+        ...parseSlug(process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK),
+        ref: process.env.BUILD_RUNNER_REF ?? 'main',
+      }
+      const shot = await screenshotInSession(client, {
+        session: args.session,
+        issueNumber: args.issueNumber,
+        engine,
+        timeoutMs: args.timeoutMs,
+      })
+      if (!shot.ok) {
+        return { ok: false, note: shot.note, output: shot.output ?? '' }
+      }
+      // Return a REAL image content block: this is what lets the model see the
+      // UI instead of guessing from a file size.
+      return {
+        __imageContent: [
+          { type: 'text', text: shot.output || '模拟器截图' },
+          { type: 'image', data: shot.data, mimeType: shot.mimeType },
+        ],
+      }
     }
     case 'session_status': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
@@ -721,6 +774,14 @@ async function handle(message) {
       }
       try {
         const value = await invoke(name, args)
+        // A tool may return raw MCP content blocks (currently only the
+        // screenshot, which must be an `image` block for the model to SEE it).
+        if (value && Array.isArray(value.__imageContent)) {
+          return reply(id, {
+            content: value.__imageContent,
+            isError: false,
+          })
+        }
         return reply(id, {
           content: [{ type: 'text', text: render(value) }],
           // Structured copy so programmatic callers do not have to parse prose.
