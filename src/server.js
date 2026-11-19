@@ -279,6 +279,12 @@ const TOOLS = [
             image: { type: 'string', description: '镜像类型，默认 google_apis' },
           },
         },
+        cjkFonts: {
+          type: 'boolean',
+          description:
+            '安装中日韩字体（约 146 秒）。**做离屏渲染截图时几乎必须开**：' +
+            'runner 自带 53 个字体里没有一个 CJK 字面，否则截图里的中文全是方块 □。',
+        },
         workspaceDir: {
           type: 'string',
           description: '本地 git 工作区。提供后会把未提交改动和未推送提交作为补丁带进会话。',
@@ -333,7 +339,8 @@ const TOOLS = [
       '适合验收布局：文字有没有被截断、卡片有没有渲染、深浅色对不对、间距是否合理。' +
       '需要项目里有渲染任务（这个项目已内置 `:desktop:renderScreens`、`renderHomePreview`、' +
       '`renderBusPreview`、`renderDegreePreview` 等多个）。' +
-      '注意：它只反映**布局**，不覆盖启动崩溃、真实数据加载和动画 —— 那些仍需模拟器。',
+      '⚠️ 建会话时请设 `cjkFonts: true`，否则中文全渲染成方块 □。' +
+      '⚠️ 它只反映**布局**，不覆盖启动崩溃、真实数据加载和动画 —— 那些仍需模拟器。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -460,6 +467,7 @@ async function invoke(toolName, args = {}) {
         timeoutMinutes,
         idleSeconds: args.idleSeconds,
         emulator: args.emulator,
+        cjkFonts: args.cjkFonts === true,
         workspacePatch: patchInline,
         patchRef,
       })
