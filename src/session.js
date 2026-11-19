@@ -209,18 +209,26 @@ export async function screenshotInSession(client, options) {
   if (!result.image?.path) {
     return { ok: false, output: result.output ?? '(无截图)', note: 'runner 没有返回图片路径' }
   }
-  // The PNG is too large for a comment, so it was committed to the engine repo;
-  // fetch it and hand the caller the bytes.
+  // The PNG is too large for a comment, so it was committed to the engine repo.
+  // Fetch it as BYTES: going through a text-decoding path mangles binary data
+  // (the first attempt returned a 2.4 MB "PNG" that was actually corrupted by
+  // UTF-8 round-tripping).
   try {
-    const raw = await client.request(
-      'GET',
-      `/repos/${engine.owner}/${engine.repo}/contents/${result.image.path}?ref=${encodeURIComponent(
-        process.env.BUILD_RUNNER_REF ?? 'main'
-      )}`,
-      { accept: 'application/vnd.github.raw' }
-    )
-    const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw))
-    if (buffer.length < 100 || buffer[0] !== 0x89) {
+    const ref = process.env.BUILD_RUNNER_REF ?? 'main'
+    const url = `https://api.github.com/repos/${engine.owner}/${engine.repo}/contents/${result.image.path}?ref=${encodeURIComponent(ref)}`
+    const token = process.env.BUILD_RUNNER_TOKEN
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.raw',
+        'User-Agent': 'build-runner-mcp',
+      },
+    })
+    if (!response.ok) {
+      return { ok: false, note: `下载截图失败：HTTP ${response.status}` }
+    }
+    const buffer = Buffer.from(await response.arrayBuffer())
+    if (buffer.length < 100 || buffer[0] !== 0x89 || buffer[1] !== 0x50) {
       return { ok: false, note: `下载到的不是 PNG（${buffer.length} 字节）` }
     }
     return {
