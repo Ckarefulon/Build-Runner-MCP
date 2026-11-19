@@ -206,14 +206,31 @@ export async function screenshotInSession(client, options) {
       note: `截图超时。确认会话里启用了 emulator，且会话仍在运行。issue #${issueNumber}`,
     }
   }
-  if (!result.image?.data) {
-    return { ok: false, output: result.output ?? '(无截图)', note: 'runner 没有返回图片数据' }
+  if (!result.image?.path) {
+    return { ok: false, output: result.output ?? '(无截图)', note: 'runner 没有返回图片路径' }
   }
-  return {
-    ok: true,
-    mimeType: result.image.mimeType ?? 'image/png',
-    data: result.image.data,
-    bytes: result.image.bytes ?? null,
-    output: result.output ?? '',
+  // The PNG is too large for a comment, so it was committed to the engine repo;
+  // fetch it and hand the caller the bytes.
+  try {
+    const raw = await client.request(
+      'GET',
+      `/repos/${engine.owner}/${engine.repo}/contents/${result.image.path}?ref=${encodeURIComponent(
+        process.env.BUILD_RUNNER_REF ?? 'main'
+      )}`,
+      { accept: 'application/vnd.github.raw' }
+    )
+    const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw))
+    if (buffer.length < 100 || buffer[0] !== 0x89) {
+      return { ok: false, note: `下载到的不是 PNG（${buffer.length} 字节）` }
+    }
+    return {
+      ok: true,
+      mimeType: 'image/png',
+      data: buffer.toString('base64'),
+      bytes: buffer.length,
+      output: result.output ?? '',
+    }
+  } catch (error) {
+    return { ok: false, note: `下载截图失败：${error.message}` }
   }
 }
