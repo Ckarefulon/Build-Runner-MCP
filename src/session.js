@@ -113,6 +113,7 @@ export async function startSession(client, options) {
     timeoutMinutes = 120,
     idleSeconds = 900,
     fetchDepth = 0,
+    emulator,
     workspacePatch = '',
     patchRef = '',
   } = options
@@ -151,6 +152,9 @@ export async function startSession(client, options) {
       runner,
       timeout_minutes: String(timeoutMinutes),
       fetch_depth: String(fetchDepth),
+      // The workflow parses this JSON to install the right system image and boot
+      // an emulator. Empty string means "no emulator".
+      emulator: emulator ? JSON.stringify(emulator) : '',
       workspace_patch: workspacePatch,
       patch_ref: patchRef,
       issue: String(issue.number),
@@ -177,4 +181,39 @@ export async function runInSession(client, options) {
     }
   }
   return { commandId, ...result }
+}
+
+/**
+ * Take a screenshot of the emulator and return the PNG itself.
+ *
+ * The runner detects the sentinel, captures the screen and inlines the PNG as
+ * base64 in its reply. That keeps this to one round trip and avoids needing a
+ * branch or artifact to carry a few tens of KB.
+ */
+export async function screenshotInSession(client, options) {
+  const { session, issueNumber, engine, timeoutMs = 60_000 } = options
+  const commandId = `${session}-shot-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
+  await sendCommand(client, {
+    engine,
+    issueNumber,
+    command: 'BR-SCREENSHOT',
+    id: commandId,
+  })
+  const result = await waitForResult(client, { engine, issueNumber, commandId, timeoutMs })
+  if (!result) {
+    return {
+      ok: false,
+      note: `截图超时。确认会话里启用了 emulator，且会话仍在运行。issue #${issueNumber}`,
+    }
+  }
+  if (!result.image?.data) {
+    return { ok: false, output: result.output ?? '(无截图)', note: 'runner 没有返回图片数据' }
+  }
+  return {
+    ok: true,
+    mimeType: result.image.mimeType ?? 'image/png',
+    data: result.image.data,
+    bytes: result.image.bytes ?? null,
+    output: result.output ?? '',
+  }
 }
