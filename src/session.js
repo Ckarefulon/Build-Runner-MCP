@@ -120,6 +120,7 @@ export async function startSession(client, options) {
     idleSeconds = 900,
     fetchDepth = 0,
     emulator,
+    cjkFonts = false,
     workspacePatch = '',
     patchRef = '',
   } = options
@@ -161,6 +162,8 @@ export async function startSession(client, options) {
       // The workflow parses this JSON to install the right system image and boot
       // an emulator. Empty string means "no emulator".
       emulator: emulator ? JSON.stringify(emulator) : '',
+      // Offscreen rendering needs CJK faces or every Chinese glyph is a box.
+      cjk_fonts: cjkFonts ? 'true' : 'false',
       workspace_patch: workspacePatch,
       patch_ref: patchRef,
       issue: String(issue.number),
