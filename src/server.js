@@ -298,6 +298,13 @@ const TOOLS = [
         session: { type: 'string', description: 'session_start 返回的 session id' },
         issueNumber: { type: 'number', description: 'session_start 返回的 issueNumber' },
         command: { type: 'string', description: '要执行的命令（可多行）' },
+        artifactPaths: {
+          type: 'string',
+          description:
+            '命令跑完后要收集的产物路径（支持通配，多行）。' +
+            '例如 "app/build/outputs/apk/debug/*.apk"。产物会作为 Release 资产上传并返回下载链接，' +
+            '不写入 git 历史，所以反复出包也不会撑大仓库。',
+        },
         timeoutMs: { type: 'number', description: '等待结果的毫秒数，默认 30 分钟' },
       },
       required: ['session', 'issueNumber', 'command'],
@@ -438,6 +445,7 @@ async function invoke(toolName, args = {}) {
         issueNumber: args.issueNumber,
         engine,
         command: args.command,
+        artifactPaths: args.artifactPaths,
         timeoutMs: args.timeoutMs,
       })
     }
