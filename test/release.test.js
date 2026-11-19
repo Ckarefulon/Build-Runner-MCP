@@ -58,6 +58,12 @@ test('workspace mode reaches dispatch instead of crashing on a typo', async () =
     getBranch: async () => ({ name: 'dev' }),
     getRepo: async () => ({ default_branch: 'dev' }),
     resolveCommit: async () => ({ sha: head, tree: { sha: 'b'.repeat(40) } }),
+    // The patch is published when it exceeds the inline dispatch limit, and the
+    // working tree at test time is not guaranteed to be clean. Both transports
+    // must be stubbed or this test fails for an unrelated reason.
+    publishBlobFile: async () => ({ branch: 'br-patch/owner-repo', sha: 'a'.repeat(40) }),
+    upsertRef: async () => ({}),
+    putFile: async () => ({ commit: { sha: 'c'.repeat(40) } }),
     dispatch: async () => {
       throw new Error('STUB_DISPATCH_REACHED')
     },
