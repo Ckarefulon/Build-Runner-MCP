@@ -327,6 +327,33 @@ const TOOLS = [
     },
   },
   {
+    name: 'session_render',
+    description:
+      '在会话里**离屏渲染**界面并直接把 PNG 返回给你看 —— 不需要模拟器，复用热的 Gradle daemon。' +
+      '适合验收布局：文字有没有被截断、卡片有没有渲染、深浅色对不对、间距是否合理。' +
+      '需要项目里有渲染任务（这个项目已内置 `:desktop:renderScreens`、`renderHomePreview`、' +
+      '`renderBusPreview`、`renderDegreePreview` 等多个）。' +
+      '注意：它只反映**布局**，不覆盖启动崩溃、真实数据加载和动画 —— 那些仍需模拟器。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'session_start 返回的 session id' },
+        issueNumber: { type: 'number', description: '会话对应的 issue 号' },
+        gradleTask: {
+          type: 'string',
+          description: '要执行的渲染任务，默认 ":desktop:renderScreens"。',
+        },
+        outputDir: {
+          type: 'string',
+          description: 'PNG 输出目录，默认自动生成一个临时目录。',
+        },
+        maxImages: { type: 'number', description: '最多返回几张图，默认 4。' },
+        timeoutMs: { type: 'number', description: '等待毫秒数，默认 20 分钟' },
+      },
+      required: ['session', 'issueNumber'],
+    },
+  },
+  {
     name: 'session_status',
     description: '查看常驻会话的状态：还能活多久、执行过哪些命令、最近的结果。',
     inputSchema: {
@@ -472,6 +499,69 @@ async function invoke(toolName, args = {}) {
           { type: 'image', data: shot.data, mimeType: shot.mimeType },
         ],
       }
+    }
+    case 'session_render': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engine = {
+        ...parseSlug(process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK),
+        ref: process.env.BUILD_RUNNER_REF ?? 'main',
+      }
+
+      const run = await renderScreensInSession(client, {
+        session: args.session,
+        issueNumber: args.issueNumber,
+        engine,
+        gradleTask: args.gradleTask ?? ':desktop:renderScreens',
+        outputDir: args.outputDir,
+        timeoutMs: args.timeoutMs,
+      })
+
+      const artifacts = (run.artifacts ?? []).filter(
+        asset => typeof asset.name === 'string' && asset.name.toLowerCase().endsWith('.png')
+      )
+      const maxImages = Math.min(Number(args.maxImages) || 4, 8)
+      const chosen = artifacts.slice(0, maxImages)
+
+      if (chosen.length === 0) {
+        return {
+          ok: false,
+          exitCode: run.exitCode,
+          output: String(run.output ?? '').slice(-2000),
+          note: '渲染任务没有产出 PNG。确认 gradleTask 名称正确，或查看上面的输出。',
+        }
+      }
+
+      // Download each PNG as bytes and hand them to the model as image blocks.
+      const blocks = [
+        {
+          type: 'text',
+          text:
+            `渲染 ${chosen.length} 张（任务 ${args.gradleTask ?? ':desktop:renderScreens'}，` +
+            `exit=${run.exitCode}）`,
+        },
+      ]
+      for (const asset of chosen) {
+        try {
+          const response = await fetch(asset.url, {
+            headers: {
+              Authorization: `Bearer ${process.env.BUILD_RUNNER_TOKEN}`,
+              'User-Agent': 'build-runner-mcp',
+            },
+          })
+          if (!response.ok) continue
+          const buffer = Buffer.from(await response.arrayBuffer())
+          if (buffer.length < 100 || buffer[0] !== 0x89) continue
+          blocks.push({ type: 'text', text: `— ${asset.name}（${buffer.length} 字节）` })
+          blocks.push({ type: 'image', data: buffer.toString('base64'), mimeType: 'image/png' })
+        } catch {
+          /* skip a broken asset, keep the rest */
+        }
+      }
+
+      if (blocks.length === 1) {
+        return { ok: false, note: '产物下载失败，未能取到图片', output: String(run.output ?? '').slice(-1500) }
+      }
+      return { __imageContent: blocks }
     }
     case 'session_status': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
