@@ -49,12 +49,18 @@ export async function openSessionIssue(client, { engine, title, body }) {
 }
 
 /** Post one command as a comment on the session issue. */
-export async function sendCommand(client, { engine, issueNumber, command, id }) {
+export async function sendCommand(client, { engine, issueNumber, command, id, artifactPaths }) {
   const commandId = id ?? randomUUID().slice(0, 8)
+  // The richer JSON form lets one command carry extra instructions without
+  // changing the comment protocol. Raw text stays supported.
+  const payload =
+    artifactPaths && artifactPaths !== ''
+      ? JSON.stringify({ command, artifactPaths })
+      : command
   await client.request(
     'POST',
     `/repos/${engine.owner}/${engine.repo}/issues/${issueNumber}/comments`,
-    { body: { body: `${CMD_PREFIX}${commandId}\n\`\`\`\n${command}\n\`\`\`` } }
+    { body: { body: `${CMD_PREFIX}${commandId}\n\`\`\`\n${payload}\n\`\`\`` } }
   )
   return commandId
 }
@@ -166,12 +172,12 @@ export async function startSession(client, options) {
 
 /** Run one command in the session and return its result. */
 export async function runInSession(client, options) {
-  const { session, issueNumber, engine, command, timeoutMs } = options
+  const { session, issueNumber, engine, command, timeoutMs, artifactPaths } = options
   // Each command needs its OWN id. Reusing the session id made the second read
   // return the first command's result, because ids are what correlate a command
   // with its reply.
   const commandId = `${session}-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
-  await sendCommand(client, { engine, issueNumber, command, id: commandId })
+  await sendCommand(client, { engine, issueNumber, command, id: commandId, artifactPaths })
   const result = await waitForResult(client, { engine, issueNumber, commandId, timeoutMs })
   if (!result) {
     return {
