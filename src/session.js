@@ -196,6 +196,55 @@ export async function runInSession(client, options) {
  * base64 in its reply. That keeps this to one round trip and avoids needing a
  * branch or artifact to carry a few tens of KB.
  */
+/**
+ * Screenshot by RENDERING, not by booting a device.
+ *
+ * For composable UI this is far cheaper than an emulator: it reuses the warm
+ * Gradle daemon, needs no system image, and works on any runner. A real project
+ * often already has a render task (this one has `:desktop:renderScreens`, which
+ * draws the shared screens with ImageComposeScene).
+ *
+ * The trade-off is honest: it shows how a screen LAYS OUT, not how the app
+ * behaves at runtime. Crashes on startup, real data loading and animations are
+ * still emulator-only.
+ */
+export async function renderScreensInSession(client, options) {
+  const {
+    session,
+    issueNumber,
+    engine,
+    gradleTask = ':desktop:renderScreens',
+    outputDir,
+    timeoutMs = 20 * 60 * 1000,
+  } = options
+
+  // The task writes wherever it likes (this project writes into its own build
+  // dir), so collect PNGs by modification time rather than guessing a path. The
+  // list is printed too: the caller needs to know which file is which screen.
+  const command = [
+    'chmod +x ./gradlew 2>/dev/null || true',
+    'echo "=== 运行渲染任务 ==="',
+    'T=$(date +%s)',
+    `./gradlew ${gradleTask} --console=plain 2>&1 | tail -25`,
+    'rc=$?',
+    'echo "render=$(( $(date +%s) - T ))s exit=$rc"',
+    'echo "=== 产出 ==="',
+    // Anything newer than the task start is an output of this run.
+    'find . -name "*.png" -newermt "-15 minutes" -not -path "*/node_modules/*" 2>/dev/null | head -40',
+  ].join('\n')
+
+  const result = await runInSession(client, {
+    ...options,
+    command,
+    // AUTO_PNG tells the runner to collect whatever PNGs this command just
+    // produced, so the caller does not need to know the project's output layout.
+    artifactPaths: 'AUTO_PNG',
+    timeoutMs,
+  })
+  return result
+}
+
+/** Capture the emulator's screen. Requires `emulator` in session_start. */
 export async function screenshotInSession(client, options) {
   const { session, issueNumber, engine, timeoutMs = 60_000 } = options
   const commandId = `${session}-shot-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
