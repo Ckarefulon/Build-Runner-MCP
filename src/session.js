@@ -270,122 +270,41 @@ export async function renderScreensInSession(client, options) {
   return result
 }
 
+// The UI acceptance script builder lives in its own module: it is several
+// hundred lines of shell generation and has nothing to do with session transport.
+export { buildUiAcceptanceScript } from './ui-acceptance.js'
+
 /**
- * Build a repeatable UI acceptance script.
+ * Build a script that cleans abandoned Gradle cache debris.
  *
- * The reported cost was not the business change but re-deriving the same manual
- * sequence every time: launch, dismiss the agreement page, open the test screen,
- * tap the picker, walk DocumentsUI, single-select, multi-select, cancel, then
- * screenshot and read logcat. Written once as a script, the sequence costs the
- * same every run and the assertions are explicit rather than eyeballed.
+ * `diagnose_env` reported 952 `.part`/`.lock` files on a machine where builds had
+ * been interrupted. Those slow incremental builds and occasionally wedge a task,
+ * and nothing was ever removing them.
  *
- * Deliberately built on `adb shell` + `uiautomator dump` instead of a UI
- * automation framework: no new dependency, no instrumentation APK, and the
- * output (a PNG plus a text dump) is exactly what a human would check.
- *
- * @param {object} spec
- * @param {string} spec.launch        `am start` component or intent, e.g. `-n pkg/.Main`
- * @param {Array<{name:string,text?:string,resourceId?:string,tap?:boolean}>} spec.steps
- * @param {string[]} spec.expectText  Strings that MUST appear in the final dump
- * @param {string} [spec.packageName] Package for logcat filtering
+ * Deliberately conservative: only files older than an hour are touched, so a
+ * concurrent build's in-flight locks survive.
  */
-export function buildUiAcceptanceScript(spec) {
-  const { launch, steps = [], expectText = [], packageName } = spec
-  const lines = [
-    'set +e',
-    'set +o pipefail',
-    'export PATH="$PATH:${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools"',
-    '',
-    // Screenshots go under a build directory so the artifact collector
-    // (`AUTO_PNG`, which only looks in */build/*) picks them up. Writing them to
-    // /tmp silently produced zero images.
-    'SHOT_DIR="build/ui-acceptance"',
-    'mkdir -p "$SHOT_DIR"',
-    'shot() { adb exec-out screencap -p > "$SHOT_DIR/$1.png" 2>/dev/null; echo "  截图 $SHOT_DIR/$1.png ($(stat -c%s "$SHOT_DIR/$1.png" 2>/dev/null || echo 0) 字节)"; }',
-    'dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb shell cat /sdcard/ui.xml 2>/dev/null; }',
-    '',
-    'echo "===== 启动 ====="',
-    `adb shell am start -W ${launch} 2>&1 | tail -3`,
-    'sleep 3',
-    'shot launch',
-    '',
-    'echo "===== 等待界面稳定 ====="',
-    'for i in $(seq 1 20); do',
-    '  d=$(dump)',
-    '  [ -n "$d" ] && break',
-    '  sleep 1',
-    'done',
-    '',
-  ]
+export function buildCacheCleanupScript() {
+  return `
+set +e
+set +o pipefail
+echo "===== 清理 Gradle 缓存残骸 ====="
+before=$(find "$HOME/.gradle/caches" -name '*.part' -o -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')
+echo "清理前：$before 个"
 
-  // Each step is either an assertion (text must be present) or a tap.
-  steps.forEach((step, index) => {
-    const n = index + 1
-    lines.push(`echo "===== 步骤 ${n}：${step.name} ====="`)
-    if (step.expectText) {
-      lines.push(
-        `if dump | grep -qF ${JSON.stringify(step.expectText)}; then`,
-        `  echo "  OK 找到「${step.expectText}」"`,
-        'else',
-        `  echo "  FAIL 没有找到「${step.expectText}」"`,
-        '  FAILED=1',
-        'fi'
-      )
-    }
-    if (step.tapText) {
-      // Tap by visible text: resolve the node's bounds from the dump, then tap
-      // its centre. Text is what a human sees, so the script stays readable.
-      lines.push(
-        `bounds=$(dump | tr '>' '\\n' | grep -F ${JSON.stringify(step.tapText)} | grep -oE 'bounds="\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]"' | head -1)`,
-        'if [ -n "$bounds" ]; then',
-        '  x1=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 1p)',
-        '  y1=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 2p)',
-        '  x2=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 3p)',
-        '  y2=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 4p)',
-        '  adb shell input tap $(( (x1 + x2) / 2 )) $(( (y1 + y2) / 2 ))',
-        `  echo "  已点击「${step.tapText}」"`,
-        'else',
-        `  echo "  FAIL 找不到可点击的「${step.tapText}」"`,
-        '  FAILED=1',
-        'fi',
-        'sleep 2'
-      )
-    }
-    if (step.waitMs) lines.push(`sleep ${Math.round(step.waitMs / 1000)}`)
-    if (step.screenshot !== false) lines.push(`shot step${n}`)
-    lines.push('')
-  })
+# -mmin +60 keeps locks a running build may still hold.
+find "$HOME/.gradle/caches" -name '*.part' -mmin +60 -delete 2>/dev/null
+find "$HOME/.gradle/caches" -name '*.lock' -mmin +60 -delete 2>/dev/null
 
-  lines.push(
-    'echo "===== 最终断言 ====="',
-    'final_dump=$(dump)',
-    ...expectText.map(
-      text =>
-        `if printf '%s' "$final_dump" | grep -qF ${JSON.stringify(text)}; then echo "  OK 「${text}」"; else echo "  FAIL 缺少「${text}」"; FAILED=1; fi`
-    ),
-    '',
-    'echo "===== 界面元素摘要 ====="',
-    `printf '%s' "$final_dump" | tr '>' '\\n' | grep -oE 'text="[^"]+"' | sed 's/text="//;s/"$//' | grep -v '^$' | head -25`,
-    '',
-    packageName
-      ? [
-          'echo "===== logcat（仅崩溃）====="',
-          // `uiautomator dump` writes its node tree to logcat, which drowned the
-          // useful lines. Only crashes and the app's own errors are relevant.
-          `adb logcat -d -v brief 2>/dev/null | grep -E 'FATAL EXCEPTION|AndroidRuntime.*(FATAL|Process:)|ANR in' | head -20 || true`,
-          'echo "----- app 自身错误 -----"',
-          `adb logcat -d -v brief 2>/dev/null | grep -F "${packageName}" | grep -E ' E | W ' | tail -10 || true`,
-        ].join('\n')
-      : '',
-    '',
-    'echo "===== 结果 ====="',
-    'if [ "${FAILED:-0}" = "0" ]; then echo "UI-ACCEPTANCE=PASS"; else echo "UI-ACCEPTANCE=FAIL"; fi',
-  )
+# Orphaned per-version scratch dirs are safe to drop: Gradle re-creates them.
+after=$(find "$HOME/.gradle/caches" -name '*.part' -o -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')
+echo "清理后：$after 个（释放 $(( before - after )) 个）"
 
-  return lines.filter(line => line !== '' || true).join('\n')
+# Disk pressure is the other reason a build fails for no obvious cause.
+echo "磁盘：$(df -h "$HOME" | tail -1 | awk '{print $4 " 可用 (" $5 " 已用)"}')"
+exit 0
+`
 }
-
-/** Capture the emulator's screen. Requires `emulator` in session_start. */
 export async function screenshotInSession(client, options) {
   const { session, issueNumber, engine, timeoutMs = 60_000 } = options
   const commandId = `${session}-shot-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
