@@ -54,15 +54,30 @@ test('final expectations gate the verdict', () => {
   assert.match(script, /grep -qF "取消"/)
 })
 
-test('logcat is filtered to the app and crashes when a package is given', () => {
+test('logcat is narrowed to crashes plus the app\'s own errors', () => {
   const script = buildUiAcceptanceScript({
     launch: '-n com.example/.Main',
     steps: [],
     expectText: [],
     packageName: 'com.example',
   })
-  assert.match(script, /logcat -d/)
-  assert.match(script, /FATAL\|AndroidRuntime\|com\.example/)
+  assert.match(script, /adb logcat -d/)
+  // `uiautomator dump` floods logcat with its node tree; only crashes and the
+  // app's own E/W lines are useful.
+  assert.match(script, /FATAL EXCEPTION/)
+  assert.match(script, /com\.example/)
+})
+
+test('screenshots land where the artifact collector looks', () => {
+  const script = buildUiAcceptanceScript({
+    launch: '-n p/.Main',
+    steps: [],
+    expectText: [],
+    packageName: 'com.example',
+  })
+  // Writing to /tmp produced zero images, because AUTO_PNG only scans */build/*.
+  assert.match(script, /SHOT_DIR="build\/ui-acceptance"/)
+  assert.doesNotMatch(script, /\/tmp\/ui-\$1\.png/)
 })
 
 test('without a package name no logcat section is emitted', () => {
