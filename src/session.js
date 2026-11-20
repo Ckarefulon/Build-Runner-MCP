@@ -132,6 +132,26 @@ export async function startSession(client, options) {
   }
 
   const session = `s-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`
+
+  // Pin the commit this session builds from.
+  //
+  // The reported pain: an internal refactor forced a re-package and a second
+  // emulator verification, because nobody could say which commit the first APK
+  // came from. Recording the resolved SHA up front — and surfacing it in every
+  // result — makes "the package and the acceptance run are the same code"
+  // checkable instead of assumed.
+  let pinnedCommit = null
+  try {
+    const resolved = await client.resolveCommit(
+      String(repo).split('/')[0],
+      String(repo).split('/')[1] ?? '',
+      ref && ref !== 'HEAD' ? ref : undefined
+    )
+    pinnedCommit = resolved?.sha ?? null
+  } catch {
+    // A non-fatal best effort: the workflow resolves the ref itself anyway.
+  }
+
   const issue = await openSessionIssue(client, {
     engine,
     title: `build-runner session ${session}`,
@@ -141,11 +161,14 @@ export async function startSession(client, options) {
       '',
       `- session: \`${session}\``,
       `- 目标仓库: \`${repo}\` @ \`${ref ?? '(默认分支)'}\``,
+      pinnedCommit ? `- 基准 commit: \`${pinnedCommit}\`` : '',
       `- 上限: ${timeoutMinutes} 分钟（GitHub 单个 job 最多 6 小时）`,
       '',
       '命令以注释形式追加，每条命令由 runner 回一条结果注释。',
       '会话结束后 workspace 销毁，无法恢复。',
-    ].join('\n'),
+    ]
+      .filter(Boolean)
+      .join('\n'),
   })
 
   await client.dispatch(engine.owner, engine.repo, SESSION_WORKFLOW, {
@@ -170,7 +193,7 @@ export async function startSession(client, options) {
     },
   })
 
-  return { session, issueNumber: issue.number, issueUrl: issue.url, reusedIssue: issue.reused }
+  return { session, issueNumber: issue.number, issueUrl: issue.url, reusedIssue: issue.reused, commit: pinnedCommit }
 }
 
 /** Run one command in the session and return its result. */
@@ -245,6 +268,112 @@ export async function renderScreensInSession(client, options) {
     timeoutMs,
   })
   return result
+}
+
+/**
+ * Build a repeatable UI acceptance script.
+ *
+ * The reported cost was not the business change but re-deriving the same manual
+ * sequence every time: launch, dismiss the agreement page, open the test screen,
+ * tap the picker, walk DocumentsUI, single-select, multi-select, cancel, then
+ * screenshot and read logcat. Written once as a script, the sequence costs the
+ * same every run and the assertions are explicit rather than eyeballed.
+ *
+ * Deliberately built on `adb shell` + `uiautomator dump` instead of a UI
+ * automation framework: no new dependency, no instrumentation APK, and the
+ * output (a PNG plus a text dump) is exactly what a human would check.
+ *
+ * @param {object} spec
+ * @param {string} spec.launch        `am start` component or intent, e.g. `-n pkg/.Main`
+ * @param {Array<{name:string,text?:string,resourceId?:string,tap?:boolean}>} spec.steps
+ * @param {string[]} spec.expectText  Strings that MUST appear in the final dump
+ * @param {string} [spec.packageName] Package for logcat filtering
+ */
+export function buildUiAcceptanceScript(spec) {
+  const { launch, steps = [], expectText = [], packageName } = spec
+  const lines = [
+    'set +e',
+    'set +o pipefail',
+    'export PATH="$PATH:${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools"',
+    '',
+    'shot() { adb exec-out screencap -p > "/tmp/ui-$1.png" 2>/dev/null; echo "  截图 /tmp/ui-$1.png ($(stat -c%s "/tmp/ui-$1.png" 2>/dev/null || echo 0) 字节)"; }',
+    'dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb shell cat /sdcard/ui.xml 2>/dev/null; }',
+    '',
+    'echo "===== 启动 ====="',
+    `adb shell am start -W ${launch} 2>&1 | tail -3`,
+    'sleep 3',
+    'shot launch',
+    '',
+    'echo "===== 等待界面稳定 ====="',
+    'for i in $(seq 1 20); do',
+    '  d=$(dump)',
+    '  [ -n "$d" ] && break',
+    '  sleep 1',
+    'done',
+    '',
+  ]
+
+  // Each step is either an assertion (text must be present) or a tap.
+  steps.forEach((step, index) => {
+    const n = index + 1
+    lines.push(`echo "===== 步骤 ${n}：${step.name} ====="`)
+    if (step.expectText) {
+      lines.push(
+        `if dump | grep -qF ${JSON.stringify(step.expectText)}; then`,
+        `  echo "  OK 找到「${step.expectText}」"`,
+        'else',
+        `  echo "  FAIL 没有找到「${step.expectText}」"`,
+        '  FAILED=1',
+        'fi'
+      )
+    }
+    if (step.tapText) {
+      // Tap by visible text: resolve the node's bounds from the dump, then tap
+      // its centre. Text is what a human sees, so the script stays readable.
+      lines.push(
+        `bounds=$(dump | tr '>' '\\n' | grep -F ${JSON.stringify(step.tapText)} | grep -oE 'bounds="\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]"' | head -1)`,
+        'if [ -n "$bounds" ]; then',
+        '  x1=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 1p)',
+        '  y1=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 2p)',
+        '  x2=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 3p)',
+        '  y2=$(echo "$bounds" | grep -oE '[0-9]+' | sed -n 4p)',
+        '  adb shell input tap $(( (x1 + x2) / 2 )) $(( (y1 + y2) / 2 ))',
+        `  echo "  已点击「${step.tapText}」"`,
+        'else',
+        `  echo "  FAIL 找不到可点击的「${step.tapText}」"`,
+        '  FAILED=1',
+        'fi',
+        'sleep 2'
+      )
+    }
+    if (step.waitMs) lines.push(`sleep ${Math.round(step.waitMs / 1000)}`)
+    if (step.screenshot !== false) lines.push(`shot step${n}`)
+    lines.push('')
+  })
+
+  lines.push(
+    'echo "===== 最终断言 ====="',
+    'final_dump=$(dump)',
+    ...expectText.map(
+      text =>
+        `if printf '%s' "$final_dump" | grep -qF ${JSON.stringify(text)}; then echo "  OK 「${text}」"; else echo "  FAIL 缺少「${text}」"; FAILED=1; fi`
+    ),
+    '',
+    'echo "===== 界面元素摘要 ====="',
+    `printf '%s' "$final_dump" | tr '>' '\\n' | grep -oE 'text="[^"]+"' | sed 's/text="//;s/"$//' | grep -v '^$' | head -25`,
+    '',
+    packageName
+      ? [
+          'echo "===== logcat（错误/崩溃）====="',
+          `adb logcat -d -v brief 2>/dev/null | grep -iE 'FATAL|AndroidRuntime|${packageName}' | tail -25`,
+        ].join('\n')
+      : '',
+    '',
+    'echo "===== 结果 ====="',
+    'if [ "${FAILED:-0}" = "0" ]; then echo "UI-ACCEPTANCE=PASS"; else echo "UI-ACCEPTANCE=FAIL"; fi',
+  )
+
+  return lines.filter(line => line !== '' || true).join('\n')
 }
 
 /** Capture the emulator's screen. Requires `emulator` in session_start. */
