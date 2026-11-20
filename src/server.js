@@ -19,7 +19,9 @@ import { runCommand, getRunStatus, cancelRun, diagnose, RUNNER_REPO_FALLBACK } f
 import { createClient, parseSlug } from './github.js'
 import { publishWorkspace, inspectBuildBranch, resetBuildBranch, prepareWorkspace } from './snapshot.js'
 import { releaseArtifacts } from './release.js'
-import { startSession, runInSession, screenshotInSession, renderScreensInSession, buildUiAcceptanceScript, readResults } from './session.js'
+import { startSession, runInSession, screenshotInSession, renderScreensInSession, buildCacheCleanupScript, readResults } from './session.js'
+import { buildUiAcceptanceScript } from './ui-acceptance.js'
+import { describeError } from './errors.js'
 import { diagnoseEnvironment } from './diagnose.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -401,14 +403,42 @@ const TOOLS = [
         },
         steps: {
           type: 'array',
-          description: '按顺序执行的步骤。每步可断言文字、点击文字、并自动截图。',
+          description:
+            '按顺序执行的步骤。每个步骤可以组合多种动作：断言文字、点击文字、输入文字、滑动、滚动到底。',
           items: {
             type: 'object',
             properties: {
               name: { type: 'string', description: '步骤名（会出现在输出里）' },
               expectText: { type: 'string', description: '界面上必须出现的文字' },
-              tapText: { type: 'string', description: '要点击的可见文字' },
-              waitMs: { type: 'number', description: '点击后额外等待毫秒数' },
+              tapText: {
+                type: 'string',
+                description: '要点击的可见文字（按文字定位，比坐标稳）',
+              },
+              untilEnabled: {
+                type: 'boolean',
+                description:
+                  '配合 tapText：反复滚动直到该元素 enabled="true" 再点。' +
+                  '协议页、隐私弹窗、长列表底部的「同意/继续」都是这个模式——**最常用**。',
+              },
+              tapAt: {
+                type: 'array',
+                items: { type: 'number' },
+                description: '兜底：直接点坐标 [x, y]。文字定位失败时用。',
+              },
+              inputText: {
+                type: 'string',
+                description: '向当前焦点输入框输入文字（登录、搜索类流程）',
+              },
+              swipe: {
+                type: 'string',
+                enum: ['up', 'down', 'left', 'right'],
+                description: '滑动手势',
+              },
+              scrollToEnd: {
+                type: 'boolean',
+                description: '反复滚动直到界面不再变化（最多 8 次）',
+              },
+              waitMs: { type: 'number', description: '额外等待毫秒数' },
               screenshot: { type: 'boolean', description: '是否为本步截图，默认 true' },
             },
             required: ['name'],
@@ -430,6 +460,22 @@ const TOOLS = [
         timeoutMs: { type: 'number', description: '超时毫秒数，默认 10 分钟' },
       },
       required: ['session', 'issueNumber', 'launch'],
+    },
+  },
+  {
+    name: 'session_clean',
+    description:
+      '清掉会话里 Gradle 缓存的残骸（`.part`/`.lock` 文件）并报告磁盘余量。' +
+      '实测某台受阻机器上有 952 个残留文件，会拖慢增量构建、偶尔卡住任务。' +
+      '只删除**超过 1 小时**的残骸，所以不会碰到正在构建的锁。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'session_start 返回的 session id' },
+        issueNumber: { type: 'number', description: '会话对应的 issue 号' },
+        timeoutMs: { type: 'number', description: '超时毫秒数，默认 2 分钟' },
+      },
+      required: ['session', 'issueNumber'],
     },
   },
   {
@@ -706,6 +752,20 @@ async function invoke(toolName, args = {}) {
         }
       }
       return { __imageContent: blocks }
+    }
+    case 'session_clean': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engine = {
+        ...parseSlug(process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK),
+        ref: process.env.BUILD_RUNNER_REF ?? 'main',
+      }
+      return await runInSession(client, {
+        session: args.session,
+        issueNumber: args.issueNumber,
+        engine,
+        command: buildCacheCleanupScript(),
+        timeoutMs: args.timeoutMs ?? 2 * 60 * 1000,
+      })
     }
     case 'session_status': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
@@ -1040,9 +1100,14 @@ async function handle(message) {
               // Include the stack: a bare message ("effectiveRef is not defined")
               // says nothing about which call site broke, and this server runs as
               // a child process where the caller cannot attach a debugger.
+              //
+              // `describeError` matters because `catch` does not guarantee an
+              // Error: a rejected promise can carry a plain object whose `message`
+              // is itself an object, and interpolating that produced the useless
+              // `[object Object]`.
               text:
-                `build-runner 执行失败：${error.message}` +
-                (error.stack
+                `build-runner 执行失败：${describeError(error)}` +
+                (error && error.stack
                   ? `\n\n----- stack -----\n${String(error.stack).split('\n').slice(1, 12).join('\n')}`
                   : ''),
             },
