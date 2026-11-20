@@ -70,13 +70,39 @@ test('a truncated cache is distinguished from an empty one', () => {
   assert.ok(empty.some(h => /缓存为空/.test(h)), empty.join(' | '))
 })
 
-test('a failing repository probe is named', () => {
-  const report = ['REPO Google Maven            404', 'REPO Maven Central           TIMEOUT', 'groups: 500'].join('\n')
+test('a failing probe is named when the build really could be affected', () => {
+  const report = [
+    'REPO Google Maven            404',
+    'REPO Maven Central           TIMEOUT',
+    'groups: 500',
+  ].join('\n')
   const hints = extractHints(report)
-  const line = hints.find(h => /不可用/.test(h))
+  const line = hints.find(h => /请求失败/.test(h))
   assert.ok(line, hints.join(' | '))
   assert.match(line, /Google Maven/)
   assert.match(line, /Maven Central/)
+})
+
+test('a failing probe is downplayed when the offline build succeeded', () => {
+  // A spurious 404 next to a working offline build is noise. Claiming "repository
+  // down" there is what sent a previous investigation the wrong way.
+  const report = [
+    'REPO Maven Central           404',
+    'groups: 900',
+    'offline-config=34s',
+  ].join('\n')
+  const hints = extractHints(report)
+  assert.ok(!hints.some(h => /请求失败/.test(h)), hints.join(' | '))
+  assert.ok(
+    hints.some(h => /但离线构建成功/.test(h)),
+    `should explain that the probe failure is harmless, got: ${hints.join(' | ')}`
+  )
+})
+
+test('a re-checked repository counts as reachable', () => {
+  const report = ['REPO Maven Central           RECHECK_OK', 'groups: 900', 'offline-config=30s'].join('\n')
+  const hints = extractHints(report)
+  assert.ok(!hints.some(h => /请求失败/.test(h)), hints.join(' | '))
 })
 
 test('a missing offline result is called out rather than silently ignored', () => {
