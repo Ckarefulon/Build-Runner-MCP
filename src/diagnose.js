@@ -8,17 +8,39 @@
  * questions up front, so a failing command can be attributed immediately.
  */
 
-/** Repositories a Gradle build in this project is likely to need. */
+/**
+ * Repositories a Gradle build in this project is likely to need.
+ *
+ * Each probe targets a concrete artifact that is known to exist, never the
+ * repository root: `dl.google.com/dl/android/maven2/` and Aliyun's public root
+ * answer 404 to a directory listing while serving artifacts perfectly, which
+ * once reported two healthy repositories as broken.
+ *
+ * `fallback` is a second known-good path. A single non-2xx answer is not enough
+ * to declare a repository down — CDN edges and proxies do return occasional
+ * spurious 404s (a 200 from one machine and a 404 from another was observed for
+ * the same URL), so a failure is re-checked before any conclusion is drawn.
+ */
 const KNOWN_REPOS = [
-  // Probe a REAL ARTIFACT path, not the repository root.
-  //
-  // `dl.google.com/dl/android/maven2/` and `maven.aliyun.com/repository/public/`
-  // answer 404 to a bare directory listing while serving artifacts perfectly —
-  // probing the root reported two healthy repositories as broken.
-  { name: 'Maven Central', url: 'https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml' },
-  { name: 'Google Maven', url: 'https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml' },
-  { name: 'Gradle Plugin Portal', url: 'https://plugins.gradle.org/m2/org/jetbrains/kotlin/jvm/org.jetbrains.kotlin.jvm.gradle.plugin/maven-metadata.xml' },
-  { name: 'Aliyun mirror', url: 'https://maven.aliyun.com/repository/public/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml' },
+  {
+    name: 'Maven Central',
+    url: 'https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.0.0/kotlin-stdlib-2.0.0.pom',
+    fallback: 'https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml',
+  },
+  {
+    name: 'Google Maven',
+    url: 'https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/8.5.0/gradle-8.5.0.pom',
+    fallback: 'https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml',
+  },
+  {
+    name: 'Gradle Plugin Portal',
+    url: 'https://plugins.gradle.org/m2/org/jetbrains/kotlin/jvm/org.jetbrains.kotlin.jvm.gradle.plugin/maven-metadata.xml',
+  },
+  {
+    name: 'Aliyun mirror',
+    url: 'https://maven.aliyun.com/repository/public/org/jetbrains/kotlin/kotlin-stdlib/2.0.0/kotlin-stdlib-2.0.0.pom',
+    fallback: 'https://maven.aliyun.com/repository/public/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml',
+  },
 ]
 
 /**
@@ -30,11 +52,23 @@ const KNOWN_REPOS = [
  */
 export function buildDiagnosticScript({ cwd = '.', repos = KNOWN_REPOS } = {}) {
   const repoProbes = repos
-    .map(
-      repo =>
-        `code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "${repo.url}" 2>/dev/null || echo TIMEOUT); ` +
-        `printf 'REPO %-22s %s\\n' "${repo.name}" "$code"`
-    )
+    .map(repo => {
+      // Probe twice on failure. A lone spurious 404 must not become "repository
+      // down", which is exactly what sent a previous investigation the wrong way.
+      const lines = [
+        `code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "${repo.url}" 2>/dev/null || echo TIMEOUT)`,
+      ]
+      if (repo.fallback) {
+        lines.push(
+          `if [ "$code" != "200" ]; then`,
+          `  code2=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "${repo.fallback}" 2>/dev/null || echo TIMEOUT)`,
+          `  [ "$code2" = "200" ] && code=RECHECK_OK || code="$code/$code2"`,
+          'fi'
+        )
+      }
+      lines.push(`printf 'REPO %-22s %s\\n' "${repo.name}" "$code"`)
+      return lines.join('\n')
+    })
     .join('\n')
 
   return `
@@ -120,19 +154,30 @@ export async function diagnoseEnvironment(runCommandFn, options) {
 export function extractHints(report) {
   const hints = []
 
-  // Repository probes print `REPO <name> <code>`. Only a non-2xx status counts
-  // as a problem — matching the bare word TIMEOUT anywhere would also fire on
-  // `--max-time` inside the echoed script.
-  const probes = [...report.matchAll(/^REPO\s+(\S+(?:\s\S+)*?)\s+(\d{3}|TIMEOUT)$/gm)].map(m => ({
+  // Repository probes print `REPO <name> <code>`. A probe survives if the first
+  // request or its re-check succeeded.
+  const probes = [...report.matchAll(/^REPO\s+(\S+(?:\s\S+)*?)\s+(\S+)$/gm)].map(m => ({
     name: m[1].trim(),
     code: m[2],
   }))
-  const bad = probes.filter(p => p.code === 'TIMEOUT' || p.code === '000' || /^[45]\d\d$/.test(p.code))
-  if (bad.length > 0) {
+  const healthy = p => p.code === '200' || p.code === 'RECHECK_OK'
+  const broken = probes.filter(p => !healthy(p))
+
+  const offlineOk = /offline-config=\d+s/.test(report)
+
+  if (broken.length > 0 && !offlineOk) {
+    // Only claim a repository problem when it could actually have caused one.
     hints.push(
-      `有 ${bad.length} 个仓库不可用：` +
-        bad.map(p => `${p.name}(${p.code})`).join('、') +
-        ' —— 依赖解析会变慢或失败'
+      `有 ${broken.length} 个仓库请求失败：` +
+        broken.map(p => `${p.name}(${p.code})`).join('、') +
+        ' —— 依赖解析可能受影响'
+    )
+  } else if (broken.length > 0 && offlineOk) {
+    // Being explicit here matters: a probe failure next to a successful offline
+    // build is noise, and saying "repository down" would mislead.
+    hints.push(
+      `仓库探测有 ${broken.length} 个失败（${broken.map(p => p.name).join('、')}），` +
+        '但离线构建成功，说明依赖已缓存，可忽略'
     )
   } else if (probes.length > 0) {
     hints.push(`${probes.length} 个仓库全部可达`)
