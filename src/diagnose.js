@@ -86,9 +86,10 @@ exit 0
 
 /** Run the diagnostic in the cloud and return its report. */
 export async function diagnoseEnvironment(runCommandFn, options) {
-  const { repo, ref, workspaceDir, ...rest } = options
+  const { client, repo, ref, workspaceDir, ...rest } = options
   const script = buildDiagnosticScript()
-  const result = await runCommandFn({
+  // runCommand's signature is (client, options) — the client comes first.
+  const result = await runCommandFn(client, {
     repo,
     ref,
     workspaceDir,
