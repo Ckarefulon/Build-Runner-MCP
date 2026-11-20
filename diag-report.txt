@@ -1,0 +1,83 @@
+===== 命令 1/1 =====
+
+set +e
+set +o pipefail
+cd "." 2>/dev/null
+
+echo "===== 1. 代码状态 ====="
+echo "commit : $(git rev-parse --short HEAD 2>/dev/null || echo '(无 git)')"
+echo "branch : $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+echo "dirty  : $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') 个文件未提交"
+echo "tracked: $(git ls-files 2>/dev/null | wc -l | tr -d ' ') 个文件"
+
+echo ""
+echo "===== 2. 缓存状态 ====="
+for p in "$HOME/.gradle/caches/modules-2" "$HOME/.gradle/caches/build-cache-1" "$HOME/.gradle/wrapper" "$HOME/.gradle/caches"; do
+  if [ -e "$p" ]; then
+    echo "  $(du -sh "$p" 2>/dev/null | cut -f1)	$p"
+  else
+    echo "  (缺失)	$p"
+  fi
+done
+# A truncated module cache is the usual cause of "works in run, not in session":
+# every reused job restores a DIFFERENT subset of dependencies.
+echo "  modules-2 子目录数：$(ls "$HOME/.gradle/caches/modules-2/files-2.1" 2>/dev/null | wc -l | tr -d ' ')"
+echo "  损坏的临时文件：$(find "$HOME/.gradle/caches" -name '*.part' -o -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
+
+echo ""
+echo "===== 3. 仓库可达性 ====="
+printf '  %-24s ' "Maven Central"; code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://repo1.maven.org/maven2/" 2>/dev/null || echo TIMEOUT); printf '%s\n' "$code"
+printf '  %-24s ' "Google Maven"; code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://dl.google.com/dl/android/maven2/" 2>/dev/null || echo TIMEOUT); printf '%s\n' "$code"
+printf '  %-24s ' "Gradle Plugin Portal"; code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://plugins.gradle.org/m2/" 2>/dev/null || echo TIMEOUT); printf '%s\n' "$code"
+printf '  %-24s ' "Aliyun mirror"; code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://maven.aliyun.com/repository/public/" 2>/dev/null || echo TIMEOUT); printf '%s\n' "$code"
+
+echo ""
+echo "===== 4. 工具链 ====="
+echo "java   : $(java -version 2>&1 | head -1)"
+echo "gradle : $(grep -o 'gradle-[0-9.]*' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | head -1 || echo '?')"
+echo "ANDROID_HOME: ${ANDROID_HOME:-未设置}"
+echo "adb    : $("${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools/adb" version 2>/dev/null | head -1 || echo '不可用')"
+echo "emulator: $("[ -x ${ANDROID_HOME:-/usr/local/lib/android/sdk}/emulator/emulator" ] && echo 已装 || echo 未装)"
+
+----- 输出 -----
+===== 1. 代码状态 =====
+commit : 04b9129
+branch : dev
+dirty  : 0 个文件未提交
+tracked: 1953 个文件
+
+===== 2. 缓存状态 =====
+  245M	/home/runner/.gradle/caches/modules-2
+  3.5M	/home/runner/.gradle/caches/build-cache-1
+  152M	/home/runner/.gradle/wrapper
+  722M	/home/runner/.gradle/caches
+  modules-2 子目录数：75
+  损坏的临时文件：952
+
+===== 3. 仓库可达性 =====
+  Maven Central            200
+  Google Maven             404
+  Gradle Plugin Portal     200
+  Aliyun mirror            404
+
+===== 4. 工具链 =====
+java   : openjdk version "25.0.5" 2026-10-20 LTS
+gradle : gradle-9.6.1
+ANDROID_HOME: /usr/local/lib/android/sdk
+adb    : Android Debug Bridge version 1.0.41
+/tmp/br-cmds/001.sh: line 39: [ -x /usr/local/lib/android/sdk/emulator/emulator: No such file or directory
+emulator: 未装
+
+===== 5. 项目仓库声明 =====
+http://nexus.itgsa.com:5566/repository/sharedViewKit/
+https://github.com/WebAssembly/binaryen/releases/download
+https://github.com/yarnpkg/yarn/releases/download
+https://nodejs.org/dist
+
+===== 6. Gradle 配置阶段 =====
+
+BUILD SUCCESSFUL in 51s
+5 actionable tasks: 4 executed, 1 from cache
+Configuration cache entry stored.
+offline-config=52s  （离线成功说明缓存完整）
+----- 命令 1 退出码 0，耗时 54s -----
