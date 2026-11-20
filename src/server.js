@@ -19,7 +19,8 @@ import { runCommand, getRunStatus, cancelRun, diagnose, RUNNER_REPO_FALLBACK } f
 import { createClient, parseSlug } from './github.js'
 import { publishWorkspace, inspectBuildBranch, resetBuildBranch, prepareWorkspace } from './snapshot.js'
 import { releaseArtifacts } from './release.js'
-import { startSession, runInSession, screenshotInSession, readResults } from './session.js'
+import { startSession, runInSession, screenshotInSession, renderScreensInSession, readResults } from './session.js'
+import { diagnoseEnvironment } from './diagnose.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
@@ -361,6 +362,27 @@ const TOOLS = [
     },
   },
   {
+    name: 'diagnose_env',
+    description:
+      '在云端跑一次**环境自检**，把「环境问题」和「代码问题」立刻分开。' +
+      '一次返回：代码状态（commit/未提交数）、缓存是否完整（含 modules-2 子目录数和损坏文件数）、' +
+      '各 Maven 仓库可达性与延迟、工具链版本、项目声明的仓库，以及**离线配置阶段**耗时。' +
+      '离线构建成功 = 缓存完整、依赖不缺；失败 = 缺依赖，与代码无关。' +
+      '比看截断的 Gradle 日志快得多，强烈建议在任何"构建失败"排障之前先跑一次。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '目标仓库 owner/name' },
+        ref: { type: 'string', description: '分支/标签/SHA' },
+        workspaceDir: {
+          type: 'string',
+          description: '本地 git 工作区；提供后会连同未提交改动一起诊断',
+        },
+      },
+      required: ['repo'],
+    },
+  },
+  {
     name: 'session_status',
     description: '查看常驻会话的状态：还能活多久、执行过哪些命令、最近的结果。',
     inputSchema: {
@@ -570,6 +592,15 @@ async function invoke(toolName, args = {}) {
         return { ok: false, note: '产物下载失败，未能取到图片', output: String(run.output ?? '').slice(-1500) }
       }
       return { __imageContent: blocks }
+    }
+    case 'diagnose_env': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      return await diagnoseEnvironment(runCommand, {
+        repo: args.repo,
+        ref: args.ref,
+        workspaceDir: args.workspaceDir,
+        client,
+      })
     }
     case 'session_status': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
