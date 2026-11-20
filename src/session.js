@@ -296,7 +296,12 @@ export function buildUiAcceptanceScript(spec) {
     'set +o pipefail',
     'export PATH="$PATH:${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools"',
     '',
-    'shot() { adb exec-out screencap -p > "/tmp/ui-$1.png" 2>/dev/null; echo "  截图 /tmp/ui-$1.png ($(stat -c%s "/tmp/ui-$1.png" 2>/dev/null || echo 0) 字节)"; }',
+    // Screenshots go under a build directory so the artifact collector
+    // (`AUTO_PNG`, which only looks in */build/*) picks them up. Writing them to
+    // /tmp silently produced zero images.
+    'SHOT_DIR="build/ui-acceptance"',
+    'mkdir -p "$SHOT_DIR"',
+    'shot() { adb exec-out screencap -p > "$SHOT_DIR/$1.png" 2>/dev/null; echo "  截图 $SHOT_DIR/$1.png ($(stat -c%s "$SHOT_DIR/$1.png" 2>/dev/null || echo 0) 字节)"; }',
     'dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb shell cat /sdcard/ui.xml 2>/dev/null; }',
     '',
     'echo "===== 启动 ====="',
@@ -364,8 +369,12 @@ export function buildUiAcceptanceScript(spec) {
     '',
     packageName
       ? [
-          'echo "===== logcat（错误/崩溃）====="',
-          `adb logcat -d -v brief 2>/dev/null | grep -iE 'FATAL|AndroidRuntime|${packageName}' | tail -25`,
+          'echo "===== logcat（仅崩溃）====="',
+          // `uiautomator dump` writes its node tree to logcat, which drowned the
+          // useful lines. Only crashes and the app's own errors are relevant.
+          `adb logcat -d -v brief 2>/dev/null | grep -E 'FATAL EXCEPTION|AndroidRuntime.*(FATAL|Process:)|ANR in' | head -20 || true`,
+          'echo "----- app 自身错误 -----"',
+          `adb logcat -d -v brief 2>/dev/null | grep -F "${packageName}" | grep -E ' E | W ' | tail -10 || true`,
         ].join('\n')
       : '',
     '',
