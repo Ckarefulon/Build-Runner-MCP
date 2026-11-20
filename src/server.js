@@ -19,7 +19,7 @@ import { runCommand, getRunStatus, cancelRun, diagnose, RUNNER_REPO_FALLBACK } f
 import { createClient, parseSlug } from './github.js'
 import { publishWorkspace, inspectBuildBranch, resetBuildBranch, prepareWorkspace } from './snapshot.js'
 import { releaseArtifacts } from './release.js'
-import { startSession, runInSession, screenshotInSession, renderScreensInSession, readResults } from './session.js'
+import { startSession, runInSession, screenshotInSession, renderScreensInSession, buildUiAcceptanceScript, readResults } from './session.js'
 import { diagnoseEnvironment } from './diagnose.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -383,6 +383,56 @@ const TOOLS = [
     },
   },
   {
+    name: 'session_ui_accept',
+    description:
+      '在会话的模拟器里跑一段**可复现的 UI 验收脚本**：启动 App → 按步骤断言/点击（按可见文字定位）→ ' +
+      '每步截图 → 最终断言 → 过滤 logcat，最后给出 PASS/FAIL。' +
+      '把「协议页 → 测试页 → 点选择文件 → DocumentsUI → 单选/多选/取消」这类固定流程一次写成 spec，' +
+      '以后每次跑都一致、可比对，不用再手动重复。' +
+      '需要会话里带 `emulator`。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'session_start 返回的 session id' },
+        issueNumber: { type: 'number', description: '会话对应的 issue 号' },
+        launch: {
+          type: 'string',
+          description: 'am start 参数，例如 "-n com.xjtu.toolbox/.MainActivity"',
+        },
+        steps: {
+          type: 'array',
+          description: '按顺序执行的步骤。每步可断言文字、点击文字、并自动截图。',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: '步骤名（会出现在输出里）' },
+              expectText: { type: 'string', description: '界面上必须出现的文字' },
+              tapText: { type: 'string', description: '要点击的可见文字' },
+              waitMs: { type: 'number', description: '点击后额外等待毫秒数' },
+              screenshot: { type: 'boolean', description: '是否为本步截图，默认 true' },
+            },
+            required: ['name'],
+          },
+        },
+        expectText: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '最终必须出现的文字（不满足则整体 FAIL）',
+        },
+        packageName: {
+          type: 'string',
+          description: '包名；给出后会额外过滤 logcat 里的崩溃与该包日志',
+        },
+        collectScreenshots: {
+          type: 'boolean',
+          description: '是否把截图作为图片返回，默认 true',
+        },
+        timeoutMs: { type: 'number', description: '超时毫秒数，默认 10 分钟' },
+      },
+      required: ['session', 'issueNumber', 'launch'],
+    },
+  },
+  {
     name: 'session_status',
     description: '查看常驻会话的状态：还能活多久、执行过哪些命令、最近的结果。',
     inputSchema: {
@@ -601,6 +651,61 @@ async function invoke(toolName, args = {}) {
         workspaceDir: args.workspaceDir,
         client,
       })
+    }
+    case 'session_ui_accept': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      const engine = {
+        ...parseSlug(process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK),
+        ref: process.env.BUILD_RUNNER_REF ?? 'main',
+      }
+      const script = buildUiAcceptanceScript({
+        launch: args.launch,
+        steps: args.steps ?? [],
+        expectText: args.expectText ?? [],
+        packageName: args.packageName,
+      })
+      const run = await runInSession(client, {
+        session: args.session,
+        issueNumber: args.issueNumber,
+        engine,
+        command: script,
+        artifactPaths: args.collectScreenshots === false ? '' : 'AUTO_PNG',
+        timeoutMs: args.timeoutMs ?? 10 * 60 * 1000,
+      })
+
+      const output = String(run.output ?? '')
+      const passed = /UI-ACCEPTANCE=PASS/.test(output)
+      const failed = /UI-ACCEPTANCE=FAIL/.test(output)
+
+      const blocks = [
+        {
+          type: 'text',
+          text:
+            `${passed ? '✅ UI 验收通过' : failed ? '❌ UI 验收失败' : '⚠️ 未得到结论'}\n\n` +
+            output.slice(-3000),
+        },
+      ]
+
+      if (args.collectScreenshots !== false) {
+        for (const asset of (run.artifacts ?? []).slice(0, 6)) {
+          try {
+            const response = await fetch(asset.url, {
+              headers: {
+                Authorization: `Bearer ${process.env.BUILD_RUNNER_TOKEN}`,
+                'User-Agent': 'build-runner-mcp',
+              },
+            })
+            if (!response.ok) continue
+            const buffer = Buffer.from(await response.arrayBuffer())
+            if (buffer.length < 100 || buffer[0] !== 0x89) continue
+            blocks.push({ type: 'text', text: `— ${asset.name}` })
+            blocks.push({ type: 'image', data: buffer.toString('base64'), mimeType: 'image/png' })
+          } catch {
+            /* skip broken asset */
+          }
+        }
+      }
+      return { __imageContent: blocks }
     }
     case 'session_status': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
