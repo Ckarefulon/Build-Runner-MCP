@@ -10,10 +10,15 @@
 
 /** Repositories a Gradle build in this project is likely to need. */
 const KNOWN_REPOS = [
-  { name: 'Maven Central', url: 'https://repo1.maven.org/maven2/' },
-  { name: 'Google Maven', url: 'https://dl.google.com/dl/android/maven2/' },
-  { name: 'Gradle Plugin Portal', url: 'https://plugins.gradle.org/m2/' },
-  { name: 'Aliyun mirror', url: 'https://maven.aliyun.com/repository/public/' },
+  // Probe a REAL ARTIFACT path, not the repository root.
+  //
+  // `dl.google.com/dl/android/maven2/` and `maven.aliyun.com/repository/public/`
+  // answer 404 to a bare directory listing while serving artifacts perfectly —
+  // probing the root reported two healthy repositories as broken.
+  { name: 'Maven Central', url: 'https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml' },
+  { name: 'Google Maven', url: 'https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml' },
+  { name: 'Gradle Plugin Portal', url: 'https://plugins.gradle.org/m2/org/jetbrains/kotlin/jvm/org.jetbrains.kotlin.jvm.gradle.plugin/maven-metadata.xml' },
+  { name: 'Aliyun mirror', url: 'https://maven.aliyun.com/repository/public/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml' },
 ]
 
 /**
@@ -27,9 +32,8 @@ export function buildDiagnosticScript({ cwd = '.', repos = KNOWN_REPOS } = {}) {
   const repoProbes = repos
     .map(
       repo =>
-        `printf '  %-24s ' "${repo.name}"; ` +
         `code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "${repo.url}" 2>/dev/null || echo TIMEOUT); ` +
-        `printf '%s\\n' "$code"`
+        `printf 'REPO %-22s %s\\n' "${repo.name}" "$code"`
     )
     .join('\n')
 
@@ -37,48 +41,53 @@ export function buildDiagnosticScript({ cwd = '.', repos = KNOWN_REPOS } = {}) {
 set +e
 set +o pipefail
 cd "${cwd}" 2>/dev/null
+export LC_ALL=C.UTF-8 2>/dev/null || true
 
-echo "===== 1. 代码状态 ====="
-echo "commit : $(git rev-parse --short HEAD 2>/dev/null || echo '(无 git)')"
+# Section headers are pure ASCII on purpose: the report travels through shell,
+# JSON and a GitHub comment, and a non-ASCII heading came back mojibake — which
+# made the section boundaries unmatchable.
+echo "===== [1] CODE ====="
+echo "commit : $(git rev-parse --short HEAD 2>/dev/null || echo '(no git)')"
 echo "branch : $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-echo "dirty  : $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') 个文件未提交"
-echo "tracked: $(git ls-files 2>/dev/null | wc -l | tr -d ' ') 个文件"
+echo "dirty  : $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') files uncommitted"
+echo "tracked: $(git ls-files 2>/dev/null | wc -l | tr -d ' ') files"
 
 echo ""
-echo "===== 2. 缓存状态 ====="
+echo "===== [2] CACHE ====="
 for p in "$HOME/.gradle/caches/modules-2" "$HOME/.gradle/caches/build-cache-1" "$HOME/.gradle/wrapper" "$HOME/.gradle/caches"; do
   if [ -e "$p" ]; then
     echo "  $(du -sh "$p" 2>/dev/null | cut -f1)	$p"
   else
-    echo "  (缺失)	$p"
+    echo "  MISSING	$p"
   fi
 done
 # A truncated module cache is the usual cause of "works in run, not in session":
-# every reused job restores a DIFFERENT subset of dependencies.
-echo "  modules-2 子目录数：$(ls "$HOME/.gradle/caches/modules-2/files-2.1" 2>/dev/null | wc -l | tr -d ' ')"
-echo "  损坏的临时文件：$(find "$HOME/.gradle/caches" -name '*.part' -o -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
+# each job restores a different subset of dependencies.
+echo "groups: $(ls "$HOME/.gradle/caches/modules-2/files-2.1" 2>/dev/null | wc -l | tr -d ' ')"
+echo "stale : $(find "$HOME/.gradle/caches" -name '*.part' -o -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
 
 echo ""
-echo "===== 3. 仓库可达性 ====="
+echo "===== [3] REPOS ====="
 ${repoProbes}
 
 echo ""
-echo "===== 4. 工具链 ====="
-echo "java   : $(java -version 2>&1 | head -1)"
-echo "gradle : $(grep -o 'gradle-[0-9.]*' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | head -1 || echo '?')"
-echo "ANDROID_HOME: \${ANDROID_HOME:-未设置}"
-echo "adb    : $("\${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools/adb" version 2>/dev/null | head -1 || echo '不可用')"
-echo "emulator: $("[ -x \${ANDROID_HOME:-/usr/local/lib/android/sdk}/emulator/emulator" ] && echo 已装 || echo 未装)"
+echo "===== [4] TOOLCHAIN ====="
+echo "java    : $(java -version 2>&1 | head -1)"
+echo "gradle  : $(grep -o 'gradle-[0-9.]*' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | head -1 || echo '?')"
+echo "sdk     : \${ANDROID_HOME:-unset}"
+echo "adb     : $("\${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools/adb" version 2>/dev/null | head -1 || echo 'unavailable')"
+echo "emulator: $("[ -x \${ANDROID_HOME:-/usr/local/lib/android/sdk}/emulator/emulator" ] && echo installed || echo missing)"
+echo "cjk     : $(fc-list :lang=zh 2>/dev/null | wc -l | tr -d ' ') fonts"
 
 echo ""
-echo "===== 5. 项目仓库声明 ====="
-grep -hoE 'https?://[a-zA-Z0-9./:_-]+' settings.gradle.kts 2>/dev/null | sort -u | head -8 || echo "(未找到 settings.gradle.kts)"
+echo "===== [5] DECLARED REPOS ====="
+grep -hoE 'https?://[a-zA-Z0-9./:_-]+' settings.gradle.kts 2>/dev/null | sort -u | head -8 || echo "(none)"
 
 echo ""
-echo "===== 6. Gradle 配置阶段 ====="
+echo "===== [6] OFFLINE CONFIG ====="
 T=$(date +%s)
 ./gradlew help --console=plain --offline 2>&1 | tail -4
-echo "offline-config=$(( $(date +%s) - T ))s  （离线成功说明缓存完整）"
+echo "offline-config=$(( $(date +%s) - T ))s"
 
 exit 0
 `
@@ -110,26 +119,57 @@ export async function diagnoseEnvironment(runCommandFn, options) {
 /** Pull the actionable lines out of a diagnostic report. */
 export function extractHints(report) {
   const hints = []
-  if (/TIMEOUT|000\s/.test(report)) {
-    hints.push('有仓库不可达（结果为 TIMEOUT 或 000）：构建会卡在依赖解析')
+
+  // Repository probes print `REPO <name> <code>`. Only a non-2xx status counts
+  // as a problem — matching the bare word TIMEOUT anywhere would also fire on
+  // `--max-time` inside the echoed script.
+  const probes = [...report.matchAll(/^REPO\s+(\S+(?:\s\S+)*?)\s+(\d{3}|TIMEOUT)$/gm)].map(m => ({
+    name: m[1].trim(),
+    code: m[2],
+  }))
+  const bad = probes.filter(p => p.code === 'TIMEOUT' || p.code === '000' || /^[45]\d\d$/.test(p.code))
+  if (bad.length > 0) {
+    hints.push(
+      `有 ${bad.length} 个仓库不可用：` +
+        bad.map(p => `${p.name}(${p.code})`).join('、') +
+        ' —— 依赖解析会变慢或失败'
+    )
+  } else if (probes.length > 0) {
+    hints.push(`${probes.length} 个仓库全部可达`)
   }
-  if (/modules-2 子目录数：0/.test(report)) {
-    hints.push('依赖缓存为空：这次构建需要从网络重新下载全部依赖')
+
+  const groups = report.match(/groups:\s*(\d+)/)
+  if (groups) {
+    const n = Number(groups[1])
+    if (n === 0) {
+      hints.push('依赖缓存为空：这次构建需要从网络重新下载全部依赖')
+    } else if (n < 100) {
+      hints.push(`依赖缓存偏小（${n} 个 group）：很可能被截断，构建会补下载`)
+    } else {
+      hints.push(`依赖缓存完整（${n} 个 group）`)
+    }
   }
-  const dirty = report.match(/dirty\s*:\s*(\d+)/)
+
+  const dirty = report.match(/dirty\s*:\s*(\d+)\s+files uncommitted/)
   if (dirty && Number(dirty[1]) > 0) {
     hints.push(`工作区有 ${dirty[1]} 个未提交文件（通过补丁带上云端）`)
   }
+
   const off = report.match(/offline-config=(\d+)s/)
   if (off) {
     hints.push(
       Number(off[1]) < 90
-        ? `离线配置成功（${off[1]}s）：缓存完整，依赖不缺`
-        : `离线配置耗时 ${off[1]}s：缓存可能不完整，但仍可用`
+        ? `离线配置成功（${off[1]}s）：缓存自洽，不依赖网络`
+        : `离线配置耗时 ${off[1]}s：缓存可用但不完整`
     )
+  } else {
+    hints.push('离线配置未成功：缓存缺依赖，或项目必须联网解析')
   }
-  if (!/BUILD SUCCESSFUL|offline-config=\d+s/.test(report)) {
-    hints.push('配置阶段未成功：可能是真实代码问题，而非环境')
+
+  const stale = report.match(/stale\s*:\s*(\d+)/)
+  if (stale && Number(stale[1]) > 20) {
+    hints.push(`有 ${stale[1]} 个残留锁/临时文件：可能中断过，必要时清理`)
   }
+
   return hints
 }
